@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -110,6 +111,19 @@ class APITests(unittest.TestCase):
         self.assertEqual(suffix.status_code, 206)
         self.assertEqual(suffix.content, expected[-6:])
         self.assertEqual(self.client.get(url, headers={"range": f"bytes={len(expected) + 1}-"}).status_code, 416)
+
+    def test_waveform_uses_ffmpeg_real_media_and_requires_session(self):
+        if not shutil.which("ffmpeg"):
+            self.skipTest("FFmpeg optional for basic API contract tests")
+        project, result = self.publish_result()
+        url = f"/api/projects/{project['id']}/waveform/{quote(result['clips'][0]['media_id'], safe='')}"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["content-type"], "image/png")
+        self.assertTrue(response.content.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(response.content, self.client.get(url).content)
+        self.client.cookies.clear()
+        self.assertEqual(self.client.get(url).status_code, 401)
 
     def test_changed_source_cannot_be_played_as_verified_asset(self):
         _, result = self.publish_result()
