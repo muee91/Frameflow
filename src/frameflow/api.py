@@ -44,6 +44,12 @@ class ReviewInput(BaseModel):
     group_id: str | None = None
 
 
+class UndoInput(BaseModel):
+    model_config = ConfigDict(strict=True)
+    revision: int = Field(ge=1)
+    clip_id: str = Field(min_length=1)
+
+
 class ExportInput(BaseModel):
     model_config = ConfigDict(strict=True)
     revision: int = Field(ge=1)
@@ -139,6 +145,8 @@ def create_app(workspace: Path, *, engine_path=None, token=None, allowed_hosts=N
         return manager().store
 
     def present_result(project_id, result):
+        result["undo_clip_id"] = store().last_undoable_clip(
+            project_id, result["revision"], result["job_id"])
         for clip in result["clips"]:
             clip["media_url"] = f"/api/projects/{project_id}/media/{quote(clip['media_id'], safe='')}"
         return result
@@ -206,6 +214,10 @@ def create_app(workspace: Path, *, engine_path=None, token=None, allowed_hosts=N
     @app.post("/api/projects/{project_id}/review")
     def review(project_id: str, body: ReviewInput):
         return present_result(project_id, store().review(project_id, **body.model_dump()))
+
+    @app.post("/api/projects/{project_id}/review/undo")
+    def undo_review(project_id: str, body: UndoInput):
+        return present_result(project_id, store().undo_last_review(project_id, **body.model_dump()))
 
     @app.get("/api/projects/{project_id}/media/{media_id}")
     @app.head("/api/projects/{project_id}/media/{media_id}")
