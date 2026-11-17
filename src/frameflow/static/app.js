@@ -16,6 +16,8 @@
     loadedResultJob: null,
     loadingResultJob: null,
     selectedGroup: null,
+    selectedClipId: null,
+    inspectorPlayer: null,
     players: new Map(),
     playing: false,
     buffering: false,
@@ -278,6 +280,9 @@
     state.loadedResultJob = null;
     state.loadingResultJob = null;
     state.reviewVisible = false;
+    state.selectedClipId = null;
+    state.inspectorPlayer = null;
+    document.body.classList.remove("workspace-active");
     state.players.clear();
     $("review-panel").hidden = true;
     $("export-panel").hidden = true;
@@ -303,6 +308,7 @@
       const project = await request(`/api/projects/${encodeURIComponent(id)}`);
       if (generation !== state.generation) return;
       state.project = project;
+      document.body.classList.add("workspace-active");
       $("create-view").hidden = true;
       $("project-view").hidden = false;
       $("project-title").textContent = project.name;
@@ -659,7 +665,7 @@
     ).length;
     $("review-count").textContent = `${reviewed} / ${clips.length} 项已处理`;
     $("result-revision").textContent =
-      `修订 ${result.revision ?? "—"} · ${typeof result.engine === "string" ? result.engine : result.engine?.name || "同步结果"}`;
+      `修订 ${result.revision ?? "—"}`;
     const warnings = Array.isArray(result.warnings)
       ? result.warnings
       : result.warnings
@@ -746,25 +752,85 @@
       return null;
     }
   }
+  function renderSourceRail(clips) {
+    const sourceList = $("source-list");
+    const queue = $("review-queue");
+    sourceList.replaceChildren();
+    queue.replaceChildren();
+    $("rail-count").textContent = String(clips.length);
+    for (const clip of clips) {
+      const button = element("button", "source-item");
+      button.type = "button";
+      button.dataset.clipId = String(clip.id);
+      const meta = element("span", "source-item-meta");
+      meta.append(
+        element("strong", "", clip.camera || (clip.kind === "recorder" ? "REC" : "CAM")),
+        element("small", "", statusTitles[clip.status] || "待处理"),
+      );
+      button.append(meta, element("span", "source-item-name", clip.name || "素材"));
+      button.addEventListener("click", () => selectClip(String(clip.id)));
+      sourceList.append(button);
+      if (!["approved", "excluded"].includes(clip.status)) {
+        const item = element("button", "queue-item");
+        item.type = "button";
+        item.dataset.clipId = String(clip.id);
+        item.append(
+          element("span", "queue-dot"),
+          element("span", "", clip.name || "待核对素材"),
+        );
+        item.addEventListener("click", () => selectClip(String(clip.id)));
+        queue.append(item);
+      }
+    }
+    if (!queue.children.length) queue.append(element("p", "queue-done", "本组已处理"));
+  }
+  function selectClip(id) {
+    const player = state.players.get(String(id));
+    if (!player) return;
+    const previous = state.inspectorPlayer;
+    if (previous) {
+      if (previous.clip.has_video) previous.card.append(previous.info);
+      else $("audio-pool").append(previous.card);
+      previous.card.classList.remove("is-selected");
+    }
+    state.inspectorPlayer = player;
+    state.selectedClipId = String(id);
+    const inspector = $("inspector-body");
+    inspector.replaceChildren();
+    if (player.clip.has_video) inspector.append(player.info);
+    else inspector.append(player.card);
+    player.card.classList.add("is-selected");
+    const clip = player.clip;
+    $("inspector-title").textContent = clip.name || "素材";
+    $("inspector-status").textContent = statusTitles[clip.status] || "待核对";
+    $("inspector-status").classList.remove("has-unsaved");
+    if (clip.has_audio && hasMapping(clip) && clip.status !== "excluded") {
+      const listen = element("button", "button quiet compact inspector-listen", "监听此路");
+      listen.type = "button";
+      listen.addEventListener("click", () => {
+        $("audio-select").value = String(clip.id);
+        for (const item of state.players.values())
+          item.media.muted = String(item.clip.id) !== $("audio-select").value;
+        updateTransport();
+      });
+      inspector.prepend(listen);
+    }
+    document.querySelectorAll(".source-item, .queue-item").forEach((button) =>
+      button.classList.toggle("is-selected", button.dataset.clipId === String(id)));
+    for (const item of state.players.values())
+      item.card.classList.toggle("is-selected", String(item.clip.id) === String(id));
+    window.FrameflowTimeline?.selectClip(String(id));
+  }
   function renderGroup() {
     pausePlayback();
     state.players.clear();
+    state.inspectorPlayer = null;
+    $("inspector-body").replaceChildren();
     const clips = groupClips();
-    const mapped = clips.filter(
-      (clip) => hasMapping(clip) && clip.status !== "excluded",
-    );
-    state.start = mapped.length
-      ? Math.min(...mapped.map((clip) => Number(clip.offset_seconds)))
-      : 0;
-    state.end = mapped.length
-      ? Math.max(
-          ...mapped.map(
-            (clip) =>
-              Number(clip.offset_seconds) +
-              Number(clip.duration || 0) * numeric(clip.rate, 1),
-          ),
-        )
-      : 1;
+    const mapped = clips.filter((clip) => hasMapping(clip) && clip.status !== "excluded");
+    state.start = mapped.length ? Math.min(...mapped.map(clip => Number(clip.offset_seconds))) : 0;
+    state.end = mapped.length ? Math.max(...mapped.map(clip =>
+      Number(clip.offset_seconds) + Number(clip.duration || 0) * numeric(clip.rate, 1))) : 1;
     if (!(state.end > state.start)) state.end = state.start + 1;
     state.position = state.start;
     $("timeline-seek").min = String(state.start);
@@ -772,31 +838,61 @@
     $("timeline-seek").value = String(state.start);
     $("timeline-seek").disabled = !mapped.length;
     $("timeline-time").textContent = timecode(state.start);
-    $("timeline-duration").textContent = `/ ${timecode(state.end)}`;
+    $("timeline-duration").textContent = "/ " + timecode(state.end);
     $("toggle-play").disabled = !mapped.length;
-    $("group-summary").textContent =
-      `${clips.length} 项素材${mapped.length ? ` · 跨度 ${timecode(state.end - state.start)}` : " · 没有公共同步位置"}`;
-    $("playback-help").textContent = mapped.length
-      ? "公共时间轴按同步位置控制素材，监听单路声音。浏览器预览用于检查；精确到帧的交付仍需在目标软件验收。"
-      : "这些素材缺少可靠同步位置。可先单独播放，再选择同步组并填写人工位置，或明确排除。";
-    state.playbackHelp = $("playback-help").textContent;
+    $("group-summary").textContent = clips.length + " 项 · " + (mapped.length ? timecode(state.end - state.start) : "尚无公共位置");
+    state.playbackHelp = mapped.length ? "" : "尚无公共同步位置，请选择素材人工定位。";
+    $("playback-help").textContent = state.playbackHelp;
     const audioSelect = $("audio-select");
     audioSelect.replaceChildren(new Option("静音", ""));
-    for (const clip of mapped.filter((item) => item.has_audio))
-      audioSelect.add(
-        new Option(
-          `${clip.camera || clip.kind || "音轨"} · ${clip.name}`,
-          String(clip.id),
-        ),
-      );
-    const preferred =
-      mapped.find((clip) => clip.kind === "recorder" && clip.has_audio) ||
-      mapped.find((clip) => clip.has_audio);
+    for (const clip of mapped.filter(item => item.has_audio))
+      audioSelect.add(new Option((clip.camera || clip.kind || "音轨") + " · " + clip.name, String(clip.id)));
+    const preferred = mapped.find(clip => clip.kind === "recorder" && clip.has_audio) ||
+      mapped.find(clip => clip.has_audio);
     audioSelect.value = preferred ? String(preferred.id) : "";
     $("clip-grid").replaceChildren();
-    for (const clip of clips) $("clip-grid").append(createClipCard(clip));
-    if (!clips.length)
-      $("clip-grid").append(element("p", "no-clips", "当前没有可核对的素材。"));
+    $("audio-pool").replaceChildren();
+    for (const clip of clips) {
+      const card = createClipCard(clip);
+      if (clip.has_video) $("clip-grid").append(card);
+      else $("audio-pool").append(card);
+    }
+    if (!clips.length) $("clip-grid").append(element("p", "no-clips", "当前同步组没有素材。"));
+    renderSourceRail(clips);
+    const first = clips.find(clip => clip.has_video) || clips[0];
+    const selected = state.players.has(String(state.selectedClipId))
+      ? state.selectedClipId : first?.id;
+    if (selected !== undefined) selectClip(String(selected));
+    else {
+      $("inspector-title").textContent = "片段检查器";
+      $("inspector-status").textContent = "";
+    }
+    window.FrameflowTimeline?.mount({
+      group: state.selectedGroup,
+      projectId: state.project?.id,
+      clips,
+      start: state.start,
+      end: state.end,
+      position: state.position,
+      selected: state.selectedClipId,
+      onSelect: selectClip,
+      onSeek: (position) => {
+        pausePlayback();
+        state.position = Math.min(state.end, Math.max(state.start, position));
+        updateTransport();
+      },
+      onDragOffset: (id, offset) => {
+        selectClip(id);
+        const target = state.players.get(String(id));
+        if (!target || target.clip.blocked_reason) return;
+        const input = target.info.querySelector('input[type="number"]');
+        if (!input) return;
+        input.value = String(offset);
+        $("inspector-status").textContent = "待应用修正";
+        $("inspector-status").classList.add("has-unsaved");
+        pausePlayback();
+      },
+    });
     updateTransport();
   }
   function createClipCard(clip) {
@@ -826,7 +922,7 @@
       `media-wrap${clip.has_video ? "" : " audio-only"}`,
     );
     const media = element(clip.has_video ? "video" : "audio");
-    media.preload = "metadata";
+    media.preload = clip.has_video ? "metadata" : "auto";
     media.controls = !linked;
     media.playsInline = true;
     media.muted = true;
@@ -1137,6 +1233,9 @@
       ),
     );
     card.append(top, wrap, info);
+    player.card = card;
+    player.info = info;
+    card.addEventListener("click", () => selectClip(String(clip.id)));
     return card;
   }
   function sourcePosition(player, timeline = state.position) {
@@ -1221,6 +1320,7 @@
   }
   function drawTransport() {
     $("timeline-seek").value = String(state.position);
+    window.FrameflowTimeline?.setPosition(state.position);
     $("timeline-time").textContent = timecode(state.position);
     $("toggle-play").textContent = state.playing ? "暂停" : "播放";
     $("toggle-play").setAttribute(
@@ -1234,7 +1334,7 @@
       : "paused";
     if (state.playbackHelp)
       $("playback-help").textContent = state.buffering
-        ? "素材正在缓冲，公共时间轴保持在当前位置；媒体就绪后继续。点击暂停可取消播放。"
+        ? "缓冲中，播放头已暂停"
         : state.playbackHelp;
   }
   function updateTransport() {
