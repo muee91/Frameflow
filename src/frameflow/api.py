@@ -226,11 +226,27 @@ def create_app(workspace: Path, *, engine_path=None, token=None, allowed_hosts=N
         return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
 
     @app.get("/api/projects/{project_id}/waveform/{media_id}")
-    def waveform(project_id: str, media_id: str):
+    def waveform(project_id: str, media_id: str, stream: int = 0, channel: int | None = None):
         path = store().checked_binding(project_id, media_id)
+        metadata = store().asset_metadata(project_id, media_id)
+        audio_streams = metadata.get("audio_streams", [])
+        if not metadata.get("has_audio"):
+            raise HTTPException(422, "此素材没有可预览的音频流。")
+        if stream < 0 or stream >= 32 or channel is not None and (channel < 0 or channel >= 32):
+            raise HTTPException(422, "音轨或声道编号无效。")
+        if audio_streams:
+            if stream >= len(audio_streams) or (channel is not None and
+                    channel >= audio_streams[stream].get("channels", 0)):
+                raise HTTPException(422, "音轨或声道超出已探测媒体信息。")
+        elif stream != 0 or channel is not None:
+            # Old projects have only a total channel count; never guess their
+            # audio stream topology. Re-scan to expose independent channels.
+            raise HTTPException(422, "旧素材缺少分流信息，请重新扫描后选择声道。")
         signature = path_signature(path)
-        image = cached_waveform(path, manager().workspace / "waveforms", media_id, signature)
-        # A source changed during FFmpeg decoding must not be presented as current.
+        image = cached_waveform(
+            path, manager().workspace / "waveforms", media_id, signature,
+            stream_index=stream, channel_index=channel,
+        )
         verified = store().checked_binding(project_id, media_id)
         if verified != path or path_signature(verified) != signature:
             raise TaskError("SOURCE_CHANGED", "素材已变化，请重新扫描。")
