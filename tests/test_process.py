@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+from threading import Event, Thread
 import time
 import unittest
+from unittest.mock import patch
 
 from frameflow.errors import TaskCancelled, TaskError
 from frameflow.process import run_command
@@ -39,7 +42,8 @@ class ProcessTests(unittest.TestCase):
             on_line=lines.append,
             timeout=5,
         )
-        self.assertEqual(result, "ok\n")
+        # Captured bytes preserve the child platform's native text newline.
+        self.assertEqual(result, "ok" + os.linesep)
         self.assertEqual(lines, ["private-tool-output"])
         self.assertGreater(context.heartbeats, 0)
         self.assertEqual(context.activities, [])
@@ -132,6 +136,125 @@ class ProcessTests(unittest.TestCase):
                     break
                 time.sleep(0.025)
             self.assertFalse(alive, "cancel left a running descendant")
+
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object integration")
+    def test_windows_cancellation_stops_orphan_retaining_output_pipes(self):
+        import psutil
+
+        class ManualContext(Context):
+            def __init__(self):
+                super().__init__()
+                self.cancel_requested = Event()
+
+            def check_cancel(self):
+                if self.cancel_requested.is_set():
+                    raise TaskCancelled()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary).resolve() / "child.pid"
+            # The child is silent and inherits both pipes. Its parent exits
+            # before cancellation, so taskkill /PID parent /T cannot own it.
+            child_code = "import time; time.sleep(60)"
+            parent_code = (
+                "import pathlib,subprocess,sys; "
+                "p=subprocess.Popen([sys.executable,'-c',sys.argv[2]]); "
+                "pathlib.Path(sys.argv[1]).write_text(str(p.pid))"
+            )
+            context = ManualContext()
+            outcomes, leaders = [], []
+            original_popen = subprocess.Popen
+
+            def capture_leader(*args, **kwargs):
+                process = original_popen(*args, **kwargs)
+                leaders.append(process)
+                return process
+
+            def invoke():
+                try:
+                    run_command(
+                        [sys.executable, "-c", parent_code, str(pid_file), child_code],
+                        context,
+                        timeout=15,
+                    )
+                except BaseException as error:
+                    outcomes.append(error)
+                else:
+                    outcomes.append(None)
+
+            runner = Thread(target=invoke, daemon=True)
+            child = None
+            try:
+                with patch("frameflow.process.subprocess.Popen", side_effect=capture_leader):
+                    runner.start()
+                    deadline = time.monotonic() + 8
+                    while time.monotonic() < deadline:
+                        if leaders and leaders[0].poll() is not None:
+                            break
+                        if not runner.is_alive():
+                            self.fail(f"runner exited before cancellation: {outcomes}")
+                        time.sleep(0.025)
+                    self.assertTrue(leaders, "tool leader did not launch")
+                    self.assertEqual(leaders[0].poll(), 0, "leader must exit before cancellation")
+                    self.assertTrue(pid_file.exists(), "leader did not launch its child")
+                    child = psutil.Process(int(pid_file.read_text()))
+                    self.assertTrue(child.is_running(), "fixture child exited too early")
+                    self.assertTrue(runner.is_alive(), "inherited pipes must keep the runner waiting")
+                    cancelled_at = time.monotonic()
+                    context.cancel_requested.set()
+                    runner.join(timeout=5)
+                    self.assertFalse(runner.is_alive(), "cancel blocked on an orphan's output pipe")
+                    self.assertLess(time.monotonic() - cancelled_at, 3)
+                    self.assertEqual(len(outcomes), 1)
+                    self.assertIsInstance(outcomes[0], TaskCancelled)
+                    child.wait(timeout=3)
+                    self.assertFalse(child.is_running(), "cancel left the orphan running")
+            finally:
+                # Bound a failing regression as well: explicitly kill our known
+                # fixture processes, releasing readers even in a broken runner.
+                context.cancel_requested.set()
+                if child is None and pid_file.exists():
+                    try:
+                        child = psutil.Process(int(pid_file.read_text()))
+                    except psutil.NoSuchProcess:
+                        pass
+                if child is not None:
+                    try:
+                        child.kill()
+                        child.wait(timeout=3)
+                    except psutil.NoSuchProcess:
+                        pass
+                for leader in leaders:
+                    if leader.poll() is None:
+                        leader.kill()
+                        leader.wait(timeout=3)
+                runner.join(timeout=5)
+
+    @unittest.skipUnless(os.name == "nt", "Windows suspended-start integration")
+    def test_windows_assignment_failure_never_executes_tool(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary).resolve() / "executed.txt"
+            processes = []
+            original_popen = subprocess.Popen
+
+            def capture_process(*args, **kwargs):
+                process = original_popen(*args, **kwargs)
+                processes.append(process)
+                return process
+
+            with (
+                patch("frameflow.process.subprocess.Popen", side_effect=capture_process),
+                patch("win32job.AssignProcessToJobObject", side_effect=OSError("test assignment failure")),
+                self.assertRaises(TaskError) as error,
+            ):
+                run_command(
+                    [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('ran')", str(marker)],
+                    Context(),
+                    timeout=5,
+                )
+            self.assertEqual(error.exception.code, "PROCESS_CONTROL_UNAVAILABLE")
+            self.assertFalse(marker.exists(), "unprotected tool started before job assignment")
+            self.assertEqual(len(processes), 1)
+            self.assertIsNotNone(processes[0].poll(), "failed startup left a suspended process")
 
 
 if __name__ == "__main__":

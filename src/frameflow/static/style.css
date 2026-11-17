@@ -1416,3 +1416,18 @@ textarea {
   padding: 9px 7px;
   min-height: 36px;
 }
+
+/* Completed tasks leave the first screen to playback; events remain expandable. */
+#job-panel.is-finished .progress-track,
+#job-panel.is-finished .progress-caption,
+#job-panel.is-finished .stage-list,
+#job-panel.is-finished .current-task {
+  display: none;
+}
+#job-panel.is-finished .section-heading {
+  margin-bottom: 14px;
+}
+#job-panel.is-finished .activity-details {
+  margin-top: 16px;
+  padding-top: 12px;
+}

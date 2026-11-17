@@ -17,21 +17,22 @@ class WorkspaceLock:
     """Do not let a second server 'recover' a live server's jobs."""
 
     def __init__(self, root):
-        self.file = open(Path(root) / "worker.lock", "a+b")
-        self.file.seek(0)
-        if not self.file.read(1):
-            self.file.write(b"0")
-            self.file.flush()
-        self.file.seek(0)
+        self.file = None
         try:
+            self.file = open(Path(root) / "worker.lock", "a+b")
+            self.file.seek(0)
             if os.name == "nt":
                 import msvcrt
+                # Windows byte-range locks can extend beyond EOF. Do not read
+                # or initialise the byte before locking: another process's
+                # exclusive lock denies even reads of that region.
                 msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
                 fcntl.flock(self.file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            self.file.close()
+            if self.file is not None:
+                self.file.close()
             raise RuntimeError("该工作目录已有 Frameflow 运行，请使用原窗口或关闭旧进程。") from exc
 
     def close(self):
@@ -149,7 +150,7 @@ class JobManager:
             if not shutil.which("ffprobe") or not shutil.which("ffmpeg"):
                 raise TaskError("MEDIA_TOOLS_MISSING", "请安装 FFmpeg 和 ffprobe 并加入 PATH，然后重试。")
             items = media.scan_roots(job["input_roots"], ctx)
-            assets, seen, signatures = [], set(), {}
+            assets, seen = [], set()
             for index, item in enumerate(items):
                 ctx.progress("probe", index, len(items), current_item=item["path"].name,
                              message="读取真实媒体元数据并校验完整内容身份。")
@@ -158,8 +159,6 @@ class JobManager:
                     ctx.activity("发现完全相同的素材副本，仅分析一份。", "warning", asset["name"])
                     continue
                 seen.add(asset["media_id"])
-                stat = Path(asset["local_path"]).stat()
-                signatures[asset["media_id"]] = (stat.st_size, stat.st_mtime_ns)
                 assets.append(asset)
                 self.store.save_asset(job["project_id"], asset)
             if len(assets) < 2:
@@ -168,8 +167,7 @@ class JobManager:
             result = engine.synchronize(info["executable"], assets, run_dir, ctx)
             for asset in assets:
                 ctx.check_cancel()
-                stat = Path(asset["local_path"]).stat()
-                if signatures[asset["media_id"]] != (stat.st_size, stat.st_mtime_ns):
+                if self.store.checked_binding(job["project_id"], asset["media_id"]) != Path(asset["local_path"]):
                     raise TaskError("SOURCE_CHANGED", f"分析期间素材发生变化：{asset['name']}。请重试。")
             self.store.finish(job_id, "needs_review", result=result)
         except TaskCancelled:

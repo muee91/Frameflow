@@ -25,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import xml.etree.ElementTree as ET
 
 # Support both `python tools/browser_smoke.py` and `python -m tools.browser_smoke`.
@@ -114,7 +115,43 @@ def require(condition, message):
 def capture(page, artifacts: Path, filename: str):
     require(page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"),
             "The workflow has horizontal overflow at this viewport.")
-    page.screenshot(path=str(artifacts / filename), full_page=True)
+    page.screenshot(path=str(artifacts / filename), full_page=True, mask=[page.locator(".source-path")])
+
+
+
+def failure_diagnostic(error, stage, page=None):
+    """Allowlisted debugging evidence: no URLs, credentials or source paths."""
+    locations = []
+    for frame in traceback.extract_tb(error.__traceback__):
+        try:
+            relative = Path(frame.filename).resolve().relative_to(REPOSITORY)
+        except ValueError:
+            continue
+        locations.append({"file": relative.as_posix(), "line": frame.lineno, "function": frame.name})
+    diagnostic = {"stage": stage, "exception": type(error).__name__, "locations": locations}
+    if isinstance(error, GateFailure):
+        diagnostic["reason"] = str(error)
+    if page is not None:
+        try:
+            diagnostic["ui"] = page.evaluate("""() => ({
+                playbackState: document.querySelector('#toggle-play')?.dataset.playbackState || null,
+                timelineSeconds: Number(document.querySelector('#timeline-seek')?.value || 0),
+                reviewVisible: !document.querySelector('#review-panel')?.hidden,
+                exportDownloadVisible: !document.querySelector('#download-export')?.hidden,
+                media: [...document.querySelectorAll('.clip-card video, .clip-card audio')].map((media, index) => ({
+                    index, kind: media.tagName, currentTime: media.currentTime,
+                    duration: Number.isFinite(media.duration) ? media.duration : null,
+                    readyState: media.readyState, networkState: media.networkState,
+                    paused: media.paused, seeking: media.seeking, ended: media.ended,
+                    muted: media.muted, playbackRate: media.playbackRate,
+                    errorCode: media.error?.code || null,
+                    buffered: Array.from({length: Math.min(media.buffered.length, 4)}, (_, i) =>
+                        [media.buffered.start(i), media.buffered.end(i)])
+                }))
+            })""")
+        except Exception:
+            diagnostic["ui"] = {"unavailable": True}
+    return diagnostic
 
 
 def run_gate(artifacts: Path, timeout: float):
@@ -126,6 +163,14 @@ def run_gate(artifacts: Path, timeout: float):
     info = inspect_engine(executable)
     require(info["available"], "The installed Align version does not pass the adapter version gate.")
     artifacts.mkdir(parents=True, exist_ok=True)
+    stage = "generate-synthetic-media"
+
+    def checkpoint(name):
+        nonlocal stage
+        stage = name
+        print(f"frameflow-browser stage={stage}", flush=True)
+
+    checkpoint(stage)
     token = secrets.token_urlsafe(32)
     with tempfile.TemporaryDirectory(prefix="frameflow-browser-") as temporary:
         root = Path(temporary)
@@ -140,10 +185,13 @@ def run_gate(artifacts: Path, timeout: float):
                 javascript_errors = []
                 page.on("pageerror", lambda error: javascript_errors.append(str(error)))
                 try:
+                    checkpoint("open-local-ui")
                     page.goto(f"{origin}/#token={token}", wait_until="networkidle")
+                    checkpoint("check-tool-readiness")
                     page.wait_for_function("document.querySelector('#system-status').textContent.includes('已就绪')")
                     require("#token" not in page.url, "The bootstrap token remained in the address bar.")
                     capture(page, artifacts, "01-create-desktop.png")
+                    checkpoint("create-project")
                     page.get_by_label("项目名称", exact=True).fill("Synthetic browser workflow")
                     # Keep actual user-facing selection controls in the tested path.
                     page.locator("#source-rows .remove-source").last.click()
@@ -159,10 +207,12 @@ def run_gate(artifacts: Path, timeout: float):
                     require(created.value.status == 201, "Creating the project through the UI failed.")
                     project_id = created.value.json()["id"]
                     page.locator("#job-panel").wait_for(state="visible")
+                    checkpoint("wait-sync-task")
                     sync_job = wait_job(client, project_id, kind="sync", timeout=timeout)
                     require(sync_job["state"] == "needs_review", "Automatic sync bypassed the human review state.")
                     events = get_json(client, f"/api/jobs/{sync_job['id']}/events")
                     require(bool(events), "The real sync task did not emit observable events.")
+                    checkpoint("read-sync-result")
                     page.locator("#review-panel").wait_for(state="visible", timeout=20_000)
                     result = get_json(client, f"/api/projects/{project_id}/result")
                     clips = result["clips"]
@@ -174,10 +224,13 @@ def run_gate(artifacts: Path, timeout: float):
                             "The fixture does not have playable mappings.")
                     require(page.locator(".clip-card").count() == len(clips), "The review UI omitted a clip.")
                     require(page.locator("#export-fcpxml").is_disabled(), "The UI allowed export before review.")
+                    require(page.locator(".clip-form textarea").evaluate_all("items => items.every(item => item.value === '')"), "Human review reasons must not be prefilled as if playback had been verified.")
+                    checkpoint("load-media")
                     page.wait_for_function("""() => {
                         const media = [...document.querySelectorAll('.clip-card video, .clip-card audio')];
                         return media.length === 3 && media.every(item => item.readyState >= 2 && !item.error);
                     }""", timeout=30_000)
+                    checkpoint("seek-common-timeline")
                     overlap_start = max(clip["offset_seconds"] for clip in clips)
                     overlap_end = min(clip["offset_seconds"] + clip["duration"] * clip["rate"] for clip in clips)
                     require(overlap_end - overlap_start > 3, "The synthetic fixture has insufficient playback overlap.")
@@ -192,6 +245,7 @@ def run_gate(artifacts: Path, timeout: float):
                         const media = card.querySelector('video, audio');
                         return !media.seeking && Math.abs(media.currentTime - expected[card.querySelector('h3').textContent]) < 0.12;
                     })""", arg=expected, timeout=15_000)
+                    checkpoint("play-common-timeline")
                     before = page.locator(".clip-card video").evaluate_all("items => items.map(item => item.currentTime)")
                     page.locator("#toggle-play").click()
                     page.wait_for_function("""(before) => {
@@ -199,13 +253,16 @@ def run_gate(artifacts: Path, timeout: float):
                         return videos.length === 2 && videos.every((item, i) => !item.paused && item.currentTime > before[i] + 0.4);
                     }""", arg=before, timeout=15_000)
                     page.locator("#toggle-play").click()
+                    checkpoint("check-independent-audio")
                     audible = page.locator(".clip-card video, .clip-card audio").evaluate_all("items => items.filter(item => !item.muted).map(item => item.tagName)")
                     require(audible == ["AUDIO"], "Playback did not isolate the independent recorder audio.")
+                    checkpoint("capture-layout")
                     capture(page, artifacts, "02-review-desktop.png")
                     page.set_viewport_size({"width": 390, "height": 844})
                     capture(page, artifacts, "03-review-mobile.png")
                     page.set_viewport_size({"width": 1440, "height": 1050})
-                    for clip in clips:
+                    for index, clip in enumerate(clips):
+                        checkpoint(f"review-clip-{index + 1}")
                         card = page.locator(".clip-card").filter(has=page.get_by_role("heading", name=clip["name"], exact=True))
                         card.get_by_label(f"{clip['name']} 核对备注", exact=True).fill("合成测试：浏览器已播放并核对共同时间轴")
                         with page.expect_response(lambda response: response.url == f"{origin}/api/projects/{project_id}/review"
@@ -216,18 +273,22 @@ def run_gate(artifacts: Path, timeout: float):
                         page.wait_for_function("(revision) => document.querySelector('#result-revision').textContent.includes('修订 ' + revision)", arg=revision)
                     approved = get_json(client, f"/api/projects/{project_id}/result")
                     require(all(clip["status"] == "approved" for clip in approved["clips"]), "The UI did not persist all human review decisions.")
+                    checkpoint("submit-export")
                     with page.expect_response(lambda response: response.url == f"{origin}/api/projects/{project_id}/exports"
                                               and response.request.method == "POST") as exporting:
                         page.locator("#export-fcpxml").click()
                     require(exporting.value.status == 202, "The UI did not create an asynchronous export job.")
+                    checkpoint("wait-export-task")
                     export_job = wait_job(client, project_id, kind="export", timeout=timeout, job_id=exporting.value.json()["id"])
                     require(export_job["state"] == "succeeded" and bool(export_job["artifact"]), "The export did not publish an artifact.")
+                    checkpoint("download-export")
                     page.locator("#download-export").wait_for(state="visible", timeout=20_000)
                     require(page.locator("#review-panel").is_visible(), "Starting export discarded the review view.")
                     with page.expect_download() as downloaded:
                         page.locator("#download-export").click()
                     download = downloaded.value
                     require(download.failure() is None, "The browser download failed.")
+                    checkpoint("validate-download")
                     document = ET.parse(download.path()).getroot()
                     require(document.tag == "fcpxml", "The downloaded artifact is not FCPXML.")
                     asset_count = len(document.findall("./resources/asset"))
@@ -244,12 +305,17 @@ def run_gate(artifacts: Path, timeout: float):
                         "real_shoot_verified": False, "target_nle_import_verified": False,
                     }
                     (artifacts / "browser-validation.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+                    checkpoint("complete")
                     print(json.dumps(summary))
-                except BaseException:
-                    # Only synthetic project content is present; never persist a trace
-                    # containing bootstrap credentials or raw local engine results.
+                except BaseException as error:
+                    diagnostic = failure_diagnostic(error, stage, page)
+                    (artifacts / "failure.json").write_text(json.dumps(diagnostic, indent=2) + "\n", encoding="utf-8")
+                    print("frameflow-browser failure=" + json.dumps(diagnostic), file=sys.stderr, flush=True)
+                    # Only synthetic content; mask directory inputs, never the
+                    # actual playback state or errors. Do not save URL-bearing traces.
                     try:
-                        page.screenshot(path=str(artifacts / "failure.png"), full_page=True)
+                        page.screenshot(path=str(artifacts / "failure.png"), full_page=True,
+                                        mask=[page.locator(".source-path")])
                     except Exception:
                         pass
                     raise

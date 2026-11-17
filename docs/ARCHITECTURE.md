@@ -32,6 +32,7 @@ flowchart TD
 | [Syncaila](https://syncaila.com/) | 现成 Windows/macOS 同步与 NLE 交换工作流 | 适合作为后续真实素材对照，未确认公开稳定的可嵌入 SDK。 |
 | [PluralEyes](https://www.maxon.net/en/article/pluraleyes-enters-limited-maintenance-mode) | 既有商业同步流程参考 | 已进入有限维护，不作为新产品底座。 |
 | [Align MCP](https://github.com/FedyaLight/align/tree/v0.3.3/crates/align-mcp) | 已有 inspect/sync/export 工具封装 | 应用内部直接调用 CLI 更简单，不额外搭一层 MCP。 |
+| [Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[pywin32](https://github.com/mhammond/pywin32)、[psutil](https://psutil.readthedocs.io/en/latest/) | 原生进程树生命周期、暂停创建与恢复 | 仅 Windows 安装这两个成熟依赖；先将暂停的进程加入 kill-on-close Job Object 再恢复，避免父进程先退出后取消失效。 |
 | MirrorOrder 的 vendor / 底层模块 | 时间基、取消竞争、原子缓存、Range 和 FCPXML 失败案例 | 只复用经验与验收语义；本轮没有复制旧代码。 |
 
 ### MirrorOrder 独立审计
@@ -48,6 +49,8 @@ flowchart TD
 ## 3. 数据与执行
 
 项目的 roots 属于**本机配置**。`assets` 保存内容身份和媒体事实；`bindings` 保存绝对路径与文件签名，禁止写入共享清单。完整哈希期间及分析后检查源变化；同内容副本仅分析一次，同名异内容保持独立。
+
+本机变更检测统一基于文件句柄：Windows 使用原生 `FILE_BASIC_INFO.ChangeTime`，POSIX 使用 `fstat` 的 ctime，并保留设备、inode、大小和修改时间。哈希完成时的私有签名在入库前再次核对，避免旧身份绑定新内容；播放 Range 仅核对元数据，不重复读取整段原片。文件系统无法提供有效签名或旧签名不兼容时明确要求重扫。
 
 `jobs` 保存 immutable attempt 的输入快照和当前状态；`events` 是有序追加事件；`results` 保存最近成功产生的候选与 revision；`reviews` 追加人工理由与前后值。人工修订不写回引擎原始 JSON，导出时从指定修订构造单独派生输入。
 
@@ -73,7 +76,7 @@ stateDiagram-v2
 
 `heartbeat_at` 仅说明 worker 仍在服务；`progress_at` 只有真实阶段、计数、当前文件或任务变化时推进。静默并不等于失败，界面报告无新进展时长。对超时、工具缺失、损坏媒体、源变化、版本不兼容、取消等使用稳定原因码。
 
-子进程不使用 shell，独立进程组、有限输出、取消轮询、deadline、终止后回收。成功结果在检查取消的同一 SQLite 事务中发布。只能清理本 attempt 自己创建的临时目录。重启恢复不是断点续算；崩溃后的候选必须重试，不能静默“补成功”。
+子进程不使用 shell；POSIX 使用独立进程组，Windows 使用 Job Object。有限输出、取消轮询、deadline、终止后回收属于同一执行边界；Windows 隔离或恢复失败时不启动媒体处理。成功结果在检查取消的同一 SQLite 事务中发布。只能清理本 attempt 自己创建的临时目录。重启恢复不是断点续算；崩溃后的候选必须重试，不能静默“补成功”。
 
 ## 4. Align 适配契约
 
@@ -95,7 +98,7 @@ CLI 当前不暴露可靠优雅取消 checkpoint；Frameflow 用进程组退出+
 
 | 目标 | 官方/现成能力与下一项验收 |
 | --- | --- |
-| [Resolve](https://www.blackmagicdesign.com/products/davinciresolve/collaboration) | 多轨交换与原生 multicam 分开。最新 21.1 已扩展 scripting/MCP 方向，具体 CreateMulticamClip 等方法以目标安装内 Developer/Scripting 文档与运行时为准，不能照搬旧“API 永不支持”结论。版本、Studio/Free、Mac App Store 来源分别验证。 |
+| [Resolve 原生协作](https://www.blackmagicdesign.com/products/davinciresolve/collaboration)与[官方 21.1 发布说明](https://www.blackmagicdesign.com/media/partial/release/20260908-03) | 多轨交换与原生 multicam 分开。官方已提供 AI 助手集成并扩展脚本能力；优先验证目标安装的原生 multicam 脚本入口与官方 MCP。具体方法和选项以安装内 Developer/Scripting 文档与运行时为准，不能照搬旧“API 永不支持”结论。版本、Studio/Free、Mac App Store 来源分别验证。 |
 | [Premiere](https://helpx.adobe.com/premiere-pro/using/create-multi-camera-source-sequence.html) | 检查真正的 Multi-Camera Source Sequence，源监视器/时间线切换、独立录音与全部通道；XML 平铺轨道不是验收。 |
 | [Final Cut Pro XML](https://developer.apple.com/documentation/professional-video-applications/fcpxml-reference) | 原生结构需要 media/multicam/mc-angle 与 mc-clip/mc-source；DTD/结构验证后仍需实际 Angle Editor、切换、保存重开。 |
 | 国内剪映专业版 | 尚未核实公开稳定官方桌面工程 SDK/导入约定。不能将国际 CapCut 或私有 draft 生成器当成国内 Windows/macOS 都已支持。保留独立实验适配与版本验收。 |

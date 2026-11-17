@@ -23,22 +23,17 @@ _MAX_LINE = 8192
 _POLL_SECONDS = 0.1
 
 
-def _stop_tree(process: subprocess.Popen) -> None:
+def _stop_tree(process: subprocess.Popen, windows_job=None) -> None:
     """Stop this invocation's descendants, even after its parent has exited."""
     if os.name == "nt":
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=3,
-                check=False,
-                shell=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
-        if process.poll() is None:
+        # The job owns descendants independently of the leader's lifetime.
+        # taskkill /T cannot find that tree once the leader has disappeared.
+        assigned = windows_job is not None and windows_job.assigned
+        if windows_job is not None:
+            windows_job.close()
+        # Assignment can fail while the leader is still suspended and outside
+        # the job. It must be killed without ever being resumed.
+        if not assigned and process.poll() is None:
             process.kill()
     else:
         try:
@@ -89,6 +84,7 @@ def run_command(
     context.check_cancel()
     sink = None
     process = None
+    windows_job = None
     stopped = Event()
     # A fixed queue bounds memory even if a tool floods stderr. Readers apply
     # backpressure; cancellation can still stop them without waiting on a put.
@@ -149,6 +145,17 @@ def run_command(
                 sink = Path(stdout_path).open("wb")
             except OSError as exc:
                 raise TaskError("OUTPUT_UNWRITABLE", "无法写入任务临时输出。", retryable=True) from exc
+        if os.name == "nt":
+            try:
+                from ._windows_job import WindowsJob
+
+                windows_job = WindowsJob()
+            except Exception as exc:
+                raise TaskError(
+                    "PROCESS_CONTROL_UNAVAILABLE",
+                    "无法建立 Windows 任务进程保护，工具尚未开始运行。",
+                    retryable=False,
+                ) from exc
         try:
             process = subprocess.Popen(
                 argv,
@@ -159,10 +166,29 @@ def run_command(
                 cwd=cwd,
                 env=env,
                 start_new_session=os.name != "nt",
-                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0,
+                creationflags=windows_job.creation_flags if windows_job is not None else 0,
             )
         except OSError as exc:
             raise TaskError("TOOL_UNAVAILABLE", "媒体工具不存在或无法启动。", retryable=False) from exc
+
+        if windows_job is not None:
+            try:
+                windows_job.assign(process)
+            except Exception as exc:
+                raise TaskError(
+                    "PROCESS_CONTROL_UNAVAILABLE",
+                    "无法保护 Windows 工具进程，本次工具未运行。",
+                    retryable=False,
+                ) from exc
+            context.check_cancel()
+            try:
+                windows_job.resume(process)
+            except Exception as exc:
+                raise TaskError(
+                    "PROCESS_CONTROL_UNAVAILABLE",
+                    "无法启动受保护的 Windows 工具进程。",
+                    retryable=False,
+                ) from exc
 
         assert process.stderr is not None
         readers.append(Thread(target=read_stderr, args=(process.stderr,), daemon=True))
@@ -208,9 +234,13 @@ def run_command(
         return b"".join(output).decode("utf-8", errors="replace") if sink is None else ""
     except BaseException:
         if process is not None:
-            _stop_tree(process)
+            _stop_tree(process, windows_job)
         raise
     finally:
+        # Release the job before joining readers or closing buffered pipes;
+        # an orphan retaining an inherited pipe must not keep either blocked.
+        if windows_job is not None:
+            windows_job.close()
         stopped.set()
         for thread in readers:
             thread.join(timeout=1)

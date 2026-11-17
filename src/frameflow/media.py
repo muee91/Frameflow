@@ -11,16 +11,13 @@ from pathlib import Path
 import stat
 
 from .errors import TaskError
+from .file_state import descriptor_signature, path_signature
 from .process import run_command
 
 
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mxf", ".mts", ".m2ts", ".avi", ".mkv", ".m4v", ".webm", ".mpg", ".mpeg", ".3gp"})
 AUDIO_EXTENSIONS = frozenset({".wav", ".wave", ".bwf", ".aif", ".aiff", ".flac", ".m4a", ".mp3", ".aac", ".ogg"})
 _CHUNK_BYTES = 1024 * 1024
-
-
-def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
 
 def _regular_stat(path: Path) -> os.stat_result:
@@ -33,6 +30,14 @@ def _regular_stat(path: Path) -> os.stat_result:
     if not stat.S_ISREG(value.st_mode):
         raise TaskError("MEDIA_UNREADABLE", f"素材 {path.name} 不是普通文件。", retryable=False)
     return value
+
+
+def _source_signature(path: Path) -> dict:
+    _regular_stat(path)
+    try:
+        return path_signature(path)
+    except OSError as exc:
+        raise TaskError("MEDIA_UNREADABLE", f"无法验证素材 {path.name} 的文件状态。", retryable=True) from exc
 
 
 def scan_roots(roots: list[dict], ctx) -> list[dict]:
@@ -153,8 +158,8 @@ def probe_and_hash(item: dict, ctx) -> dict:
     """Inspect actual streams and hash every byte, refusing a changing source."""
     path = Path(item["path"])
     ctx.check_cancel()
-    before = _regular_stat(path)
-    if before.st_size <= 0:
+    before = _source_signature(path)
+    if before["size"] <= 0:
         raise TaskError("INVALID_MEDIA", f"素材 {path.name} 是空文件。", retryable=False)
     ctx.progress("probe", 0, 1, unit="files", current_item=path.name, message="读取媒体信息。")
     raw = run_command(
@@ -188,12 +193,12 @@ def probe_and_hash(item: dict, ctx) -> dict:
     ctx.progress("probe", 1, 1, unit="files", current_item=path.name, message="媒体信息已读取。")
     digest = hashlib.sha256()
     count = 0
-    ctx.progress("hash", 0, before.st_size, unit="bytes", current_item=path.name, message="验证素材完整身份。")
+    ctx.progress("hash", 0, before["size"], unit="bytes", current_item=path.name, message="验证素材完整身份。")
     try:
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "rb") as source:
-            if _signature(os.fstat(source.fileno())) != _signature(before):
+            if descriptor_signature(source.fileno()) != before:
                 raise TaskError("SOURCE_CHANGED", f"素材 {path.name} 在读取期间发生变化，请稍后重试。", retryable=True)
             while True:
                 ctx.check_cancel()
@@ -202,15 +207,15 @@ def probe_and_hash(item: dict, ctx) -> dict:
                     break
                 digest.update(chunk)
                 count += len(chunk)
-                if count > before.st_size:
+                if count > before["size"]:
                     raise TaskError("SOURCE_CHANGED", f"素材 {path.name} 在读取期间发生变化，请稍后重试。", retryable=True)
                 ctx.heartbeat()
-                ctx.progress("hash", count, before.st_size, unit="bytes", current_item=path.name)
-            unchanged_handle = _signature(os.fstat(source.fileno())) == _signature(before)
+                ctx.progress("hash", count, before["size"], unit="bytes", current_item=path.name)
+            unchanged_handle = descriptor_signature(source.fileno()) == before
     except OSError as exc:
         raise TaskError("MEDIA_UNREADABLE", f"无法完整读取素材 {path.name}。", retryable=True) from exc
-    after = _regular_stat(path)
-    if not unchanged_handle or _signature(after) != _signature(before) or count != before.st_size:
+    after = _source_signature(path)
+    if not unchanged_handle or after != before or count != before["size"]:
         raise TaskError("SOURCE_CHANGED", f"素材 {path.name} 在读取期间发生变化，请稍后重试。", retryable=True)
     ctx.check_cancel()
     timecode = None
@@ -238,7 +243,8 @@ def probe_and_hash(item: dict, ctx) -> dict:
         "audio_channels": sum(_positive_int(stream.get("channels")) for stream in audios),
         "camera": item["camera"],
         "kind": item["kind"],
-        "bytes": before.st_size,
+        "bytes": before["size"],
         "local_path": str(path.absolute()),
+        "_source_signature": after,
         "timecode": timecode,
     }

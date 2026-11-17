@@ -41,6 +41,7 @@ def time_value(seconds):
 
 
 def fixtures(root):
+    root = Path(root).resolve()
     assets = []
     for letter in ("A", "B"):
         assets.append({"id": "sha256:" + letter * 64, "media_id": "sha256:" + letter * 64, "name": f"{letter} take.wav", "local_path": str(root / f"{letter} take.wav"), "kind": "recorder", "camera": letter, "duration": 30.0, "fps": None, "has_video": False, "has_audio": True, "width": 0, "height": 0, "audio_channels": 1})
@@ -58,7 +59,7 @@ class EngineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.assets, self.raw = fixtures(self.root)
         self.verified_paths = {asset["media_id"]: Path(asset["local_path"]) for asset in self.assets}
         for path in self.verified_paths.values():

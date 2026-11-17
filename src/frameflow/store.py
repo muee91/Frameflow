@@ -13,6 +13,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from .errors import Conflict, TaskCancelled, TaskError
+from .file_state import path_signature
 
 ACTIVE = {"queued", "running", "cancelling"}
 RETRYABLE = {"failed", "cancelled", "interrupted"}
@@ -152,9 +153,17 @@ class Store:
                     "roots": json.loads(row["roots_json"])}
 
     def save_asset(self, project_id, asset):
-        public = {k: v for k, v in asset.items() if k != "local_path"}
-        value = Path(asset["local_path"]).stat()
-        signature = [value.st_size, value.st_mtime_ns, value.st_ctime_ns]
+        public = {k: v for k, v in asset.items() if k not in {"local_path", "_source_signature"}}
+        try:
+            signature = path_signature(Path(asset["local_path"]))
+        except OSError as exc:
+            raise TaskError("MEDIA_UNREADABLE", "无法验证本机素材文件状态，请检查素材后重试。") from exc
+        # Probe supplies the state that enclosed its full-content hash. Never
+        # associate that old hash with a fresh signature after a source change.
+        # Internal test/import callers without a probe snapshot still bind the
+        # current state, but the production scanner always supplies this field.
+        if asset.get("_source_signature") is not None and signature != asset["_source_signature"]:
+            raise TaskError("SOURCE_CHANGED", "素材在身份校验后发生变化，请重新扫描核验身份。")
         with self.transaction() as db:
             db.execute("INSERT INTO assets VALUES(?,?,?) ON CONFLICT(project_id,media_id) DO UPDATE SET metadata_json=excluded.metadata_json",
                        (project_id, asset["media_id"], encode(public)))
@@ -176,8 +185,13 @@ class Store:
         path = Path(row["path"])
         if not path.is_file() or path.is_symlink() or path.resolve() != path:
             raise TaskError("MEDIA_OFFLINE", "素材离线或位置已变化，请恢复素材后重试。")
-        value = path.stat()
-        if [value.st_size, value.st_mtime_ns, value.st_ctime_ns] != json.loads(row["signature_json"]):
+        try:
+            signature = path_signature(path)
+        except OSError as exc:
+            raise TaskError("MEDIA_UNREADABLE", "无法验证本机素材文件状态，请检查素材后重试。") from exc
+        # Older unversioned snapshots are deliberately not trusted/migrated in
+        # place; re-scanning is required to establish a full current identity.
+        if signature != json.loads(row["signature_json"]):
             raise TaskError("SOURCE_CHANGED", "素材内容或文件信息已变化，请重新扫描核验身份。")
         return path
 

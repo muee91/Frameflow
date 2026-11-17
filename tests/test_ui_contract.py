@@ -82,6 +82,22 @@ class UIContractTests(unittest.TestCase):
             with self.subTest(label=target):
                 self.assertIn(target, self.parser.ids, "A visible field label has no input target.")
 
+    def test_browser_failure_diagnostic_keeps_location_without_raw_exception_secrets(self):
+        from tools.browser_smoke import failure_diagnostic
+        import json
+
+        try:
+            raise TimeoutError("Navigation to https://local.invalid/#token=private-token at /private/media/source.mov timed out")
+        except TimeoutError as error:
+            diagnostic = failure_diagnostic(error, "play-common-timeline")
+        self.assertEqual(diagnostic["stage"], "play-common-timeline")
+        self.assertEqual(diagnostic["exception"], "TimeoutError")
+        self.assertTrue(diagnostic["locations"])
+        self.assertEqual(diagnostic["locations"][-1]["file"], "tests/test_ui_contract.py")
+        serialized = json.dumps(diagnostic)
+        for secret in ("private-token", "https://", "/private/media", str(Path.cwd())):
+            self.assertNotIn(secret, serialized)
+
     def test_engine_work_is_submitted_by_post_and_artifact_download_is_read_only(self):
         """Protect the HTTP boundary used by the browser workflow gate."""
         with tempfile.TemporaryDirectory() as directory:

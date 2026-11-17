@@ -24,7 +24,8 @@
 - [x] 外部 Align 0.3.3 实际调用与严格结果适配；unknown/unmatched/nonlinear 不伪装成功。
 - [x] 核对界面与真实 media route、单路监听、人工起点/同步组修正、revision 审计。
 - [x] 无本机路径 manifest 与异步实验性单组 FCPXML 候选导出。
-- [ ] 浏览器实际播放/布局、跨浏览器解码、长文件内存与播放漂移验证。
+- [ ] Chromium 合成素材完整浏览器流程：播放/缓冲/核对/下载与桌面、窄屏布局。
+- [ ] 跨浏览器专业编码解码、长文件内存与播放漂移验证。
 - [ ] 真实剧组短样本验收：重复对白、无 TC、多次开停机、局部错位、漂移、损坏音频。
 - [ ] 分段映射人工修正与撤销、漂移纠正副本、专业编码代理、波形/精确逐帧核对。
 - [ ] 完整多轨母版：全部原片/所有独立音轨与声道、多组独立交付及多天真实时间关系。
@@ -76,10 +77,11 @@
 - MirrorOrder 只读基线 `88e585e1`：96 项底层定向测试通过；未移植旧代码；旧 main CI 失败状态不当作新产品证据。
 - Align 官方 v0.3.3 Linux 包 SHA256：`3098b7c3d98db1058c1131a13ccdaa1f208c20f4b9504d8a70c647e332a7f307`。单独解包运行 CLI，无系统安装，无捆绑提交。
 - 30 秒单对合成 WAV + 1.250 秒延迟：真实 CLI 产生 12 anchors，误差约 17 微秒。这是局部探针，不能推广到不同输入次序、长片、重复对白或所有编码。
-- 本地全量 71 项测试通过（无 skip，含两个 opt-in 真实 Align 用例）；覆盖 API、状态竞争、媒体、进程、引擎、修订与静态资源。使用 Python 3.12、真实 FFmpeg 7.1.5 / Align 0.3.3。
+- 本地收集 80 项测试，78 项通过、2 项 Windows 专属测试按平台跳过；包括两个 opt-in 真实 Align 用例。覆盖 API、状态竞争、媒体、进程、引擎、修订与静态资源。使用 Python 3.12、真实 FFmpeg 7.1.5 / Align 0.3.3；不能把 Windows skip 当作通过。
 - 完整合成处理链：60 秒确定性声音、两路 H.264/AAC-LC MP4、独立立体 PCM WAV，1.250 秒已知错位。真实扫描/FFprobe/哈希/Align→全部 proposed→逐片人工理由→manifest→异步 FCPXML 下载通过，偏移误差 <= 25fps 的一帧。XML 验证了三份素材、立体音频、两条 sequence 以及 multicam/mc-angle/mc-clip；没有在 NLE 导入。
 - 独立审查复现并修复：失败重扫更新绑定后，旧 raw 引擎路径可能指向错误文件。导出现在强制使用当前已验证的 media ID→路径，并在完成前再次检查相同文件；新增旧路径替换、导出期间源变化、人工 offset 与有理数 mapping 一致性的回归。
-- DOM 行为测试与 JS 语法检查通过；当前 Cloud 浏览器预览路径受环境限制，没有据此宣称真实浏览器播放/视觉验收通过。
+- 首轮 CI 的 Linux 核心与真实 Align 链通过，Windows/macOS 路径/文件状态/锁与真实浏览器缓冲检查发现失败，已针对实际原因修复，等待新提交 CI 复验。Windows 另加入 Job Object 父进程退出后的取消、隔离失败不执行工具的真实回归。
+- DOM 行为测试与 JS 语法检查通过，覆盖缓冲恢复、手动暂停使迟到回调失效、播放错误阻止确认、源帧微调与独立录音 10ms 微调。核对理由不预填；完成任务收起事件，不挤占播放区。当前 Cloud 浏览器预览路径受环境限制，没有据此宣称真实浏览器播放/视觉验收通过。
 - 真实拍摄素材：**未验证**。Windows/macOS 完整应用与 NLE 原生导入：**未验证**。没有任何目标 NLE 标记为 import_verified。
 
 复现真实合成链：设置 `FRAMEFLOW_TEST_ALIGN` 指向单独安装的 0.3.3 CLI，再运行 `python -m unittest discover -s tests -v`。真实浏览器 gate 使用 `python tools/browser_smoke.py --artifacts <临时证据目录>`；CI 在专用 runner 安装 Playwright Chromium 后运行。生成的媒体、原始 JSON、数据库和工程不提交仓库。

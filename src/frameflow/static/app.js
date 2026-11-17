@@ -18,6 +18,11 @@
     selectedGroup: null,
     players: new Map(),
     playing: false,
+    buffering: false,
+    startingPlayback: false,
+    playbackToken: 0,
+    masterPlayer: null,
+    playbackHelp: "",
     position: 0,
     start: 0,
     end: 1,
@@ -27,6 +32,7 @@
     reviewVisible: false,
     creating: false,
     actionPending: false,
+    jobDisplayKey: null,
   };
   const activeStates = new Set(["queued", "running", "cancelling"]);
   const stateTitles = {
@@ -142,6 +148,20 @@
     }
     const number = Number(value);
     return Number.isFinite(number) ? number : fallback;
+  }
+  function positiveFrameRate(value) {
+    if (typeof value === "number")
+      return Number.isFinite(value) && value > 0 ? value : null;
+    if (typeof value !== "string") return null;
+    const match = value.trim().match(/^(\d+(?:\.\d+)?)(?:\/(\d+(?:\.\d+)?))?$/);
+    if (!match) return null;
+    const numerator = Number(match[1]);
+    const denominator = match[2] === undefined ? 1 : Number(match[2]);
+    return numerator > 0 &&
+      denominator > 0 &&
+      Number.isFinite(numerator / denominator)
+      ? numerator / denominator
+      : null;
   }
   function setStep(step) {
     document.querySelectorAll(".steps li").forEach((li) => {
@@ -405,6 +425,13 @@
     const job = state.job;
     if (!job) return;
     $("job-panel").hidden = false;
+    const isFinished = ["needs_review", "succeeded"].includes(job.state);
+    $("job-panel").classList.toggle("is-finished", isFinished);
+    const displayKey = `${job.id}:${job.state}`;
+    if (state.jobDisplayKey !== displayKey) {
+      $("activity-details").open = !isFinished;
+      state.jobDisplayKey = displayKey;
+    }
     $("job-title").textContent =
       job.kind === "export"
         ? {
@@ -751,6 +778,7 @@
     $("playback-help").textContent = mapped.length
       ? "公共时间轴按同步位置控制素材，监听单路声音。浏览器预览用于检查；精确到帧的交付仍需在目标软件验收。"
       : "这些素材缺少可靠同步位置。可先单独播放，再选择同步组并填写人工位置，或明确排除。";
+    state.playbackHelp = $("playback-help").textContent;
     const audioSelect = $("audio-select");
     audioSelect.replaceChildren(new Option("静音", ""));
     for (const clip of mapped.filter((item) => item.has_audio))
@@ -816,14 +844,16 @@
     const playbackError = element(
       "div",
       "media-error",
-      "浏览器暂时无法播放此编码。请转码为预览副本或在目标剪辑软件核对，当前不能据此判断同步正确。",
+      "浏览器无法播放此素材，当前页不能确认同步。请检查文件与编码；仍可明确排除本次交付。",
     );
     playbackError.hidden = true;
     wrap.append(playbackError);
     const player = { media, clip, overlay, wrap, failed: false, active: false };
     state.players.set(String(clip.id), player);
     media.addEventListener("error", () => {
+      if (state.players.get(String(clip.id)) !== player) return;
       player.failed = true;
+      if (player.approveButton) player.approveButton.disabled = true;
       playbackError.hidden = false;
       if (state.playing) {
         pausePlayback();
@@ -837,17 +867,23 @@
       if (mapped) syncPlayer(player, false);
     });
     media.addEventListener("waiting", () => {
-      if (state.playing && player.active) {
-        pausePlayback();
-        showNotice(
-          "素材正在缓冲，已暂停联动播放。缓冲完成后可再次播放。",
-          "warning",
-        );
-      }
+      if (
+        state.players.get(String(clip.id)) === player &&
+        state.playing &&
+        player.active &&
+        (media.readyState < 3 || media.seeking)
+      )
+        beginBuffering();
     });
+    for (const event of ["canplay", "canplaythrough", "seeked", "loadeddata"]) {
+      media.addEventListener(event, () => {
+        if (state.players.get(String(clip.id)) === player) tryResumePlayback();
+      });
+    }
     if (!url) {
       player.failed = true;
-      playbackError.textContent = "没有可用的本机播放地址，请检查素材绑定。";
+      playbackError.textContent =
+        "没有可用的本机播放地址，请检查素材绑定。当前页不能确认同步。";
       playbackError.hidden = false;
     }
     if (!linked) {
@@ -917,24 +953,26 @@
     offset.setAttribute("aria-label", `${clip.name} 同步起点秒数`);
     offsetLabel.append(offset);
     const nudges = element("div", "frame-nudges");
-    const nudgeBack = element("button", "button quiet compact", "− 1 帧");
+    const fps = clip.has_video ? positiveFrameRate(clip.fps) : null;
+    const rate = numeric(clip.rate, 1);
+    const step = fps && rate > 0 ? rate / fps : 0.01;
+    const stepLabel = fps && rate > 0 ? "1 帧" : "10 毫秒";
+    const nudgeBack = element(
+      "button",
+      "button quiet compact",
+      `− ${stepLabel}`,
+    );
     nudgeBack.type = "button";
-    nudgeBack.setAttribute("aria-label", `${clip.name} 向前微调一帧`);
+    nudgeBack.setAttribute("aria-label", `${clip.name} 向前微调${stepLabel}`);
     nudgeBack.addEventListener("click", () => {
-      offset.value = (
-        numeric(offset.value, 0) -
-        1 / (numeric(clip.fps, 25) || 25)
-      ).toFixed(6);
+      offset.value = (numeric(offset.value, 0) - step).toFixed(6);
       pausePlayback();
     });
-    const nudge = element("button", "button quiet compact", "+ 1 帧");
+    const nudge = element("button", "button quiet compact", `+ ${stepLabel}`);
     nudge.type = "button";
-    nudge.setAttribute("aria-label", `${clip.name} 向后微调一帧`);
+    nudge.setAttribute("aria-label", `${clip.name} 向后微调${stepLabel}`);
     nudge.addEventListener("click", () => {
-      offset.value = (
-        numeric(offset.value, 0) +
-        1 / (numeric(clip.fps, 25) || 25)
-      ).toFixed(6);
+      offset.value = (numeric(offset.value, 0) + step).toFixed(6);
       pausePlayback();
     });
     nudges.append(nudgeBack, nudge);
@@ -958,7 +996,6 @@
     reason.rows = 1;
     reason.maxLength = 1000;
     reason.placeholder = "例如：口型与独立录音一致；或说明排除原因";
-    if (mapped && !clip.blocked_reason) reason.value = "已播放核对";
     reason.setAttribute("aria-label", `${clip.name} 核对备注`);
     reasonLabel.append(reason);
     form.append(reasonLabel);
@@ -975,7 +1012,8 @@
       clip.status === "excluded" ? "更新排除说明" : "排除本次交付",
     );
     exclude.type = "button";
-    approve.disabled = Boolean(clip.blocked_reason);
+    player.approveButton = approve;
+    approve.disabled = Boolean(clip.blocked_reason || player.failed);
     offset.disabled = Boolean(clip.blocked_reason);
     nudge.disabled = Boolean(clip.blocked_reason);
     nudgeBack.disabled = Boolean(clip.blocked_reason);
@@ -983,7 +1021,13 @@
     actions.append(approve, exclude);
     form.append(actions);
     const save = async (status) => {
-      if (status === "approved" && clip.blocked_reason) return;
+      if (status === "approved" && (clip.blocked_reason || player.failed)) {
+        showNotice(
+          "当前素材无法在此页完成播放核对，不能确认；可修复播放问题或明确排除。",
+          "warning",
+        );
+        return;
+      }
       const offsetValue = numeric(offset.value);
       const groupValue = groupInput ? groupInput.value : clip.group_id;
       if (
@@ -996,10 +1040,7 @@
         showNotice("确认位置前，请填写有效起点并选择同步组。", "warning");
         return;
       }
-      if (
-        !reason.value.trim() ||
-        (status === "excluded" && reason.value.trim() === "已播放核对")
-      ) {
+      if (!reason.value.trim()) {
         showNotice("请填写修正或排除的依据，方便之后追溯。", "warning");
         reason.focus();
         return;
@@ -1046,7 +1087,7 @@
           await loadResult(generation);
         } else showNotice(error.message, "error");
       } finally {
-        approve.disabled = Boolean(clip.blocked_reason);
+        approve.disabled = Boolean(clip.blocked_reason || player.failed);
         exclude.disabled = false;
       }
     };
@@ -1068,14 +1109,50 @@
     card.append(top, wrap, info);
     return card;
   }
+  function sourcePosition(player, timeline = state.position) {
+    return (
+      (timeline - Number(player.clip.offset_seconds)) /
+      numeric(player.clip.rate, 1)
+    );
+  }
+  function activePlayers() {
+    return [...state.players.values()].filter((player) => {
+      if (!hasMapping(player.clip) || player.clip.status === "excluded")
+        return false;
+      const source = sourcePosition(player);
+      return source >= 0 && source < Number(player.clip.duration || 0);
+    });
+  }
+  function playbackPosition() {
+    if (!state.playing || state.buffering) return state.position;
+    const master = state.players.get(state.masterPlayer);
+    const source = master ? sourcePosition(master) : -1;
+    if (
+      master &&
+      source >= 0 &&
+      source < Number(master.clip.duration || 0) &&
+      !master.media.paused &&
+      !master.media.seeking &&
+      !master.media.ended
+    ) {
+      return Math.min(
+        state.end,
+        Number(master.clip.offset_seconds) +
+          master.media.currentTime * numeric(master.clip.rate, 1),
+      );
+    }
+    return Math.min(
+      state.end,
+      state.clockPosition + (performance.now() - state.clockTime) / 1000,
+    );
+  }
   function syncPlayer(player, play) {
     const { clip, media } = player;
     if (!hasMapping(clip) || clip.status === "excluded" || player.failed) {
       if (play) media.pause();
       return;
     }
-    const rate = numeric(clip.rate, 1);
-    const source = (state.position - Number(clip.offset_seconds)) / rate;
+    const source = sourcePosition(player);
     const active = source >= 0 && source < Number(clip.duration || 0);
     player.active = active;
     player.overlay.textContent = active
@@ -1084,72 +1161,171 @@
         ? "这段素材尚未开始"
         : "这段素材已结束";
     media.muted = String(clip.id) !== $("audio-select").value;
-    const playbackRate = 1 / rate;
+    const playbackRate = 1 / numeric(clip.rate, 1);
     if (playbackRate < 0.0625 || playbackRate > 16) {
       player.failed = true;
       media.pause();
       return;
     }
     media.playbackRate = playbackRate;
+    const target = Math.min(
+      Math.max(0, source),
+      Math.max(0, numeric(clip.duration, 0) - 0.001),
+    );
+    // Reassigning currentTime on every paused frame restarts decoding and can
+    // itself emit waiting. Seek only when the mapped target actually differs.
     if (
       media.readyState > 0 &&
       !media.seeking &&
-      (!play || Math.abs(media.currentTime - Math.max(0, source)) > 0.08)
+      Math.abs(media.currentTime - target) > (play ? 0.08 : 0.002)
     ) {
       try {
-        media.currentTime = Math.min(
-          Math.max(0, source),
-          Math.max(0, numeric(clip.duration, 0) - 0.001),
-        );
+        media.currentTime = target;
       } catch (_) {
         /* Metadata is not seekable yet. */
       }
     }
-    if (play && active && media.paused) {
-      media.play().catch(() => {
-        if (!state.playing) return;
+    // A readiness barrier starts all active players together. Never call play()
+    // repeatedly from requestAnimationFrame while decoding is still starting.
+    if (!play || !active) media.pause();
+  }
+  function drawTransport() {
+    $("timeline-seek").value = String(state.position);
+    $("timeline-time").textContent = timecode(state.position);
+    $("toggle-play").textContent = state.playing ? "暂停" : "播放";
+    $("toggle-play").setAttribute(
+      "aria-label",
+      state.playing ? "暂停当前同步组" : "播放当前同步组",
+    );
+    $("toggle-play").dataset.playbackState = state.playing
+      ? state.buffering
+        ? "buffering"
+        : "playing"
+      : "paused";
+    if (state.playbackHelp)
+      $("playback-help").textContent = state.buffering
+        ? "素材正在缓冲，公共时间轴保持在当前位置；媒体就绪后继续。点击暂停可取消播放。"
+        : state.playbackHelp;
+  }
+  function updateTransport() {
+    drawTransport();
+    // Pending play() promises must not be aborted by an incidental UI redraw.
+    if (!state.startingPlayback) {
+      for (const player of state.players.values())
+        syncPlayer(player, state.playing && !state.buffering);
+    }
+  }
+  function tryResumePlayback() {
+    if (!state.playing || !state.buffering || state.startingPlayback) return;
+    const players = activePlayers();
+    if (players.some((player) => player.failed || player.media.error)) {
+      pausePlayback();
+      showNotice(
+        "某项素材播放失败，已停止联动。请查看对应素材窗口。",
+        "warning",
+      );
+      return;
+    }
+    if (players.some(({ media }) => media.seeking || media.readyState < 3))
+      return;
+    const attempt = ++state.playbackToken;
+    state.startingPlayback = true;
+    Promise.all(players.map(({ media }) => media.play()))
+      .then(() => {
+        if (
+          attempt !== state.playbackToken ||
+          !state.playing ||
+          !state.buffering
+        )
+          return;
+        state.startingPlayback = false;
+        if (
+          players.some(({ media }) => media.seeking || media.readyState < 3)
+        ) {
+          beginBuffering();
+          return;
+        }
+        const master =
+          players.find(
+            (player) => String(player.clip.id) === $("audio-select").value,
+          ) || players[0];
+        state.masterPlayer = master ? String(master.clip.id) : null;
+        state.clockPosition = state.position;
+        state.clockTime = performance.now();
+        state.buffering = false;
+        state.position = playbackPosition();
+        drawTransport();
+      })
+      .catch((error) => {
+        // A user pause, group change or later buffering attempt invalidates this
+        // callback. It must never restart a superseded playback intention.
+        if (attempt !== state.playbackToken || !state.playing) return;
+        state.startingPlayback = false;
+        if (error.name === "AbortError" && state.buffering) {
+          beginBuffering();
+          return;
+        }
         pausePlayback();
         showNotice(
           "浏览器未能开始某路播放。请检查素材是否可解码，然后重新播放。",
           "warning",
         );
       });
-    } else if (!play || !active) media.pause();
   }
-  function updateTransport() {
-    $("timeline-seek").value = String(state.position);
-    $("timeline-time").textContent = timecode(state.position);
-    for (const player of state.players.values())
-      syncPlayer(player, state.playing);
+  function beginBuffering() {
+    if (!state.playing) return;
+    state.position = playbackPosition();
+    state.playbackToken += 1;
+    state.buffering = true;
+    state.startingPlayback = false;
+    state.masterPlayer = null;
+    state.clockPosition = state.position;
+    state.clockTime = performance.now();
+    for (const player of state.players.values()) {
+      player.media.pause();
+      if (hasMapping(player.clip) && player.clip.status !== "excluded")
+        player.media.preload = "auto";
+    }
+    updateTransport();
   }
   function pausePlayback(exceptMedia = null) {
-    if (state.playing)
-      state.position = Math.min(
-        state.end,
-        state.clockPosition + (performance.now() - state.clockTime) / 1000,
-      );
+    state.position = playbackPosition();
     state.playing = false;
+    state.buffering = false;
+    state.startingPlayback = false;
+    state.playbackToken += 1;
+    state.masterPlayer = null;
     if (state.animation !== null) cancelAnimationFrame(state.animation);
     state.animation = null;
     for (const player of state.players.values())
       if (player.media !== exceptMedia) player.media.pause();
-    $("toggle-play").textContent = "播放";
-    $("toggle-play").setAttribute("aria-label", "播放当前同步组");
-    $("timeline-seek").value = String(state.position);
-    $("timeline-time").textContent = timecode(state.position);
+    drawTransport();
   }
   function animationFrame() {
     if (!state.playing) return;
-    state.position =
-      state.clockPosition + (performance.now() - state.clockTime) / 1000;
-    if (state.position >= state.end) {
-      state.position = state.end;
-      pausePlayback();
+    if (state.buffering) {
       updateTransport();
-      return;
+      tryResumePlayback();
+    } else {
+      state.position = playbackPosition();
+      state.clockPosition = state.position;
+      state.clockTime = performance.now();
+      if (state.position >= state.end) {
+        pausePlayback();
+        updateTransport();
+        return;
+      }
+      // A newly active clip, decode stall or pending seek freezes the whole
+      // group; once all active media has future data, the barrier resumes it.
+      if (
+        activePlayers().some(
+          ({ media }) => media.paused || media.seeking || media.readyState < 3,
+        )
+      )
+        beginBuffering();
+      else updateTransport();
     }
-    updateTransport();
-    state.animation = requestAnimationFrame(animationFrame);
+    if (state.playing) state.animation = requestAnimationFrame(animationFrame);
   }
   function togglePlay() {
     if (state.playing) {
@@ -1164,11 +1340,11 @@
       return;
     if (state.position >= state.end - 0.01) state.position = state.start;
     state.playing = true;
-    state.clockPosition = state.position;
-    state.clockTime = performance.now();
-    $("toggle-play").textContent = "暂停";
-    $("toggle-play").setAttribute("aria-label", "暂停当前同步组");
-    updateTransport();
+    // Start at the requested common position. The shared clock is stopped
+    // until all active play() calls have resolved with actual decoded data.
+    state.buffering = true;
+    beginBuffering();
+    tryResumePlayback();
     state.animation = requestAnimationFrame(animationFrame);
   }
   async function downloadResponse(url, fallbackName) {

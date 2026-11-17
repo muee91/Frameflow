@@ -34,7 +34,7 @@ class JobTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.media = self.root / "media"
         self.media.mkdir()
         (self.media / "A.mov").write_bytes(b"synthetic first source")
@@ -116,6 +116,28 @@ class JobTests(unittest.TestCase):
         self.assertEqual(len(self.seen_by_engine), 1)
         self.assertEqual(len(self.seen_by_engine[0]), 2)
         self.assertTrue(any(event["level"] == "warning" for event in self.manager.store.events(job["id"])))
+
+    def test_sync_rejects_same_size_source_change_with_restored_mtime(self):
+        def change_source(_executable, assets, _run_dir, _ctx):
+            path = Path(assets[0]["local_path"])
+            before = path.stat()
+            content = path.read_bytes()
+            with path.open("r+b") as source:
+                source.write(bytes([content[0] ^ 1]))
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            after = path.stat()
+            self.assertEqual((after.st_size, after.st_mtime_ns), (before.st_size, before.st_mtime_ns))
+            self.assertNotEqual(path.read_bytes(), content)
+            return fake_result(assets)
+
+        self.engine.synchronize = change_source
+        job = self.manager.submit(self.project["id"])
+        failed = self.wait_for(job["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(failed["error_code"], "SOURCE_CHANGED")
+        self.assertIsNone(failed["artifact"])
+        with self.assertRaises(KeyError):
+            self.manager.store.result(self.project["id"])
 
     def test_timeout_and_unexpected_engine_exception_do_not_kill_queue(self):
         outcomes = [TaskError("PROCESS_TIMEOUT", "超时。"), RuntimeError("private-local-path-in-exception"), None]
