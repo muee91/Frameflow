@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Frameflow · 多机位同步</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <header class="app-header">
+      <a class="brand" href="/" aria-label="Frameflow 首页"
+        ><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span
+        ><span>Frameflow<small>映序</small></span></a
+      >
+      <div class="header-actions">
+        <span class="local-label"><span class="status-dot"></span>本机运行</span
+        ><label class="sr-only" for="project-select">打开已有项目</label
+        ><select id="project-select">
+          <option value="">打开已有项目</option></select
+        ><button class="button quiet compact" id="new-project" type="button">
+          新建项目
+        </button>
+      </div>
+    </header>
+    <main id="main" class="shell">
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div
+        id="connection-notice"
+        class="notice warning"
+        role="status"
+        hidden
+      ></div>
+      <nav class="steps" aria-label="项目流程">
+        <ol>
+          <li data-step="0" aria-current="step"><span>01</span>选择素材</li>
+          <li data-step="1"><span>02</span>同步</li>
+          <li data-step="2"><span>03</span>播放核对</li>
+          <li data-step="3"><span>04</span>交付</li>
+        </ol>
+      </nav>
+      <section id="create-view" aria-labelledby="welcome-title">
+        <div class="hero">
+          <div class="eyebrow">给剪辑之前的工作，留一条简单的路</div>
+          <h1 id="welcome-title">让素材先对齐，<br />让剪辑先开始。</h1>
+          <p>放入各机位与独立录音。同步、播放核对，再把结果交给剪辑师。</p>
+        </div>
+        <form id="create-form" class="panel source-panel">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">新的拍摄项目</span>
+              <h2>从素材开始</h2>
+            </div>
+            <span class="subtle">原始文件保持原样</span>
+          </div>
+          <label class="field project-name" for="project-name"
+            ><span>项目名称</span
+            ><input
+              id="project-name"
+              name="name"
+              maxlength="100"
+              placeholder="例如：第一集 · 第一拍摄日"
+              required
+              autocomplete="off"
+          /></label>
+          <div class="source-labels" aria-hidden="true">
+            <span>来源</span><span>机位 / 录音名称</span
+            ><span>本机素材目录</span>
+          </div>
+          <div id="source-rows"></div>
+          <div class="source-add">
+            <button type="button" id="add-camera" class="text-button">
+              ＋ 添加机位</button
+            ><button type="button" id="add-recorder" class="text-button">
+              ＋ 添加独立录音
+            </button>
+          </div>
+          <p class="field-help">
+            每个机位可选择一个目录，子目录中的素材也会识别。录音可选；目录只在这台电脑绑定。
+          </p>
+          <div class="form-footer">
+            <div id="system-status" class="system-status" aria-live="polite">
+              正在检查本机处理工具…
+            </div>
+            <button type="submit" id="create-submit" class="button primary">
+              创建项目并开始同步 <span aria-hidden="true">↗</span>
+            </button>
+          </div>
+        </form>
+        <div class="principles">
+          <p>
+            <span>01</span
+            ><strong>先同步，再理解</strong>后台智能分析不会阻塞交付。
+          </p>
+          <p>
+            <span>02</span
+            ><strong>每一步都有依据</strong>同步不确定的素材留给你核对。
+          </p>
+          <p>
+            <span>03</span
+            ><strong>素材留在本机</strong>项目中的绝对路径独立绑定。
+          </p>
+        </div>
+      </section>
+      <section id="project-view" hidden aria-labelledby="project-title">
+        <div class="project-heading">
+          <div>
+            <div class="eyebrow">当前项目</div>
+            <h1 id="project-title"></h1>
+            <p id="project-summary" class="subtle"></p>
+          </div>
+          <button id="start-sync" type="button" class="button primary" hidden>
+            开始同步
+          </button>
+        </div>
+        <section
+          id="job-panel"
+          class="panel"
+          aria-labelledby="job-title"
+          hidden
+        >
+          <div class="section-heading">
+            <div class="job-title-wrap">
+              <span id="job-state-dot" class="large-dot"></span>
+              <div>
+                <span id="job-attempt" class="eyebrow"></span>
+                <h2 id="job-title">准备同步</h2>
+              </div>
+            </div>
+            <div class="job-actions">
+              <button
+                id="cancel-job"
+                type="button"
+                class="button quiet compact"
+                hidden
+              >
+                安全取消</button
+              ><button
+                id="retry-job"
+                type="button"
+                class="button quiet compact"
+                hidden
+              >
+                重试任务</button
+              ><button
+                id="download-export"
+                type="button"
+                class="button primary compact"
+                hidden
+              >
+                下载工程候选</button
+              ><button
+                id="open-review"
+                type="button"
+                class="button primary compact"
+                hidden
+              >
+                开始核对 <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          </div>
+          <p id="job-message" class="job-message"></p>
+          <div
+            id="job-health"
+            class="inline-warning"
+            role="status"
+            hidden
+          ></div>
+          <div
+            id="progress-track"
+            class="progress-track"
+            role="progressbar"
+            aria-label="当前阶段处理进度"
+          >
+            <div id="progress-fill"></div>
+          </div>
+          <div class="progress-caption">
+            <span id="progress-label">等待任务开始</span
+            ><span id="elapsed-time"></span>
+          </div>
+          <ol class="stage-list">
+            <li data-stage="scan"><span></span>识别素材</li>
+            <li data-stage="probe"><span></span>读取媒体信息</li>
+            <li data-stage="sync"><span></span>寻找同步关系</li>
+            <li data-stage="review"><span></span>准备核对</li>
+          </ol>
+          <div class="current-task">
+            <span class="eyebrow">当前文件或任务</span>
+            <p id="current-item">—</p>
+            <div class="task-meta">
+              <span id="heartbeat-label"></span
+              ><span id="progress-age-label"></span>
+            </div>
+          </div>
+          <div id="job-error" class="error-box" hidden>
+            <strong id="job-error-code"></strong>
+            <p id="job-error-message"></p>
+          </div>
+          <details id="activity-details" class="activity-details" open>
+            <summary>
+              <span>最近活动</span
+              ><span id="activity-count" class="subtle"></span>
+            </summary>
+            <ol id="activity-list" class="activity-list">
+              <li class="empty-activity">任务产生新活动后会显示在这里。</li>
+            </ol>
+          </details>
+        </section>
+        <section
+          id="review-panel"
+          class="panel review-panel"
+          aria-labelledby="review-title"
+          hidden
+        >
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">看一遍，才算对齐</span>
+              <h2 id="review-title">播放核对</h2>
+            </div>
+            <div class="review-count" id="review-count"></div>
+          </div>
+          <p class="review-intro">
+            选择一组素材，按同一时间播放。检查口型、动作与声音，再确认位置。播放兼容性取决于浏览器与素材编码。
+          </p>
+          <div id="result-warnings" class="result-warnings" hidden></div>
+          <div class="review-toolbar">
+            <label class="field inline-field" for="group-select"
+              ><span>同步组</span
+              ><select id="group-select"></select></label
+            ><label class="field inline-field" for="audio-select"
+              ><span>监听声音</span
+              ><select id="audio-select">
+                <option value="">静音</option>
+              </select></label
+            ><span class="subtle" id="group-summary"></span>
+          </div>
+          <div class="transport">
+            <button
+              id="toggle-play"
+              class="button primary compact"
+              type="button"
+              aria-label="播放当前同步组"
+            >
+              播放</button
+            ><label class="sr-only" for="timeline-seek">同步组时间轴</label
+            ><input
+              type="range"
+              id="timeline-seek"
+              min="0"
+              max="1"
+              value="0"
+              step="0.001"
+            /><output id="timeline-time" for="timeline-seek">00:00.000</output
+            ><span class="timeline-duration" id="timeline-duration"></span>
+          </div>
+          <p class="field-help" id="playback-help">
+            公共时间轴只控制有同步位置的素材；每个窗口显示当前源片位置。开始播放时仅监听所选音轨。
+          </p>
+          <div id="clip-grid" class="clip-grid"></div>
+          <div class="review-footnote">
+            <span id="result-revision" class="subtle"></span
+            ><span class="subtle"
+              >人工修正会保留记录，并使旧的核对结果失效。</span
+            >
+          </div>
+        </section>
+        <section
+          id="export-panel"
+          class="panel export-panel"
+          aria-labelledby="export-title"
+          hidden
+        >
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">核对完成之后</span>
+              <h2 id="export-title">交给下一位剪辑师</h2>
+            </div>
+            <span class="export-gate" id="export-gate"></span>
+          </div>
+          <p id="export-description">
+            先确认需要交付的素材；不参与本次交付的素材可以明确排除。
+          </p>
+          <div class="export-options">
+            <div>
+              <h3>同步关系清单</h3>
+              <p>共享素材身份、同步关系与人工修正。不包含本机绝对路径。</p>
+              <button id="export-manifest" class="button quiet" type="button">
+                导出同步清单
+              </button>
+            </div>
+            <div>
+              <h3>Final Cut 工程候选</h3>
+              <p>
+                FCPXML 结构实验输出。仍需在目标 Final Cut Pro
+                中核验多机位、独立音轨与时长。
+              </p>
+              <button id="export-fcpxml" class="button quiet" type="button">
+                导出 FCPXML 候选
+              </button>
+            </div>
+          </div>
+          <p class="validation-note">
+            工程文件生成成功，不代表目标剪辑软件导入验收通过。DaVinci
+            Resolve、Premiere Pro 与剪映专业版的交付验收将分别记录。
+          </p>
+        </section>
+      </section>
+      <footer class="app-footer">
+        <span>Frameflow <span class="subtle">/ 同步优先</span></span
+        ><span class="subtle">第一阶段基础版 · 结果始终需要核对</span>
+      </footer>
+    </main>
+  </body>
+</html>
