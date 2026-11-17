@@ -1865,3 +1865,27 @@ body.workspace-active .steps { display: none; }
 .audio-waveform-inspector { width: 100%; height: 100%; object-fit: fill; opacity: .88; pointer-events: none; }
 .inspector-body .clip-card .media-wrap.audio-only { min-height: 86px; height: 86px; padding: 10px; background: #172e28; }
 .inspector-body .clip-card .media-wrap.audio-only audio:not([controls]) { position: absolute; width: 1px; height: 1px; opacity: 0; }
+
+
+/* Sync corrections remain provisional; anchors are visibly distinct from approved clips. */
+.track-clip.is-snapped { outline: 2px solid #9bd5f8; outline-offset: -2px; }
+.track-segment {
+  position: absolute;
+  height: 38px;
+  border: 1px dashed #e4aa69;
+  border-radius: 3px;
+  background: repeating-linear-gradient(135deg, #5a3a27 0, #5a3a27 7px, #6e472c 7px, #6e472c 14px);
+  color: #ffdfaa;
+  font-size: 10px;
+  padding: 5px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  text-align: left;
+}
+.track-segment.is-selected, .track-unmatched.is-selected { outline: 2px solid #f1d3a1; outline-offset: -2px; }
+.mapping-diagnostic { border: 1px solid #74563d; border-radius: 5px; margin: 10px 0; font-size: 11px; color: #e5c3a1; }
+.mapping-diagnostic summary { padding: 8px; cursor: pointer; }
+.mapping-points { list-style: decimal; padding: 4px 8px 8px 25px; margin: 0; max-height: 220px; overflow-y: auto; }
+.mapping-points li { font-variant-numeric: tabular-nums; font-size: 10px; padding: 5px 2px; line-height: 1.5; border-bottom: 1px solid #594737; }
