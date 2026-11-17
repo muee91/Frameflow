@@ -253,6 +253,7 @@
                 <div class="timeline-toolbar">
                   <strong>同步时间线</strong>
                   <output id="timeline-playhead-time" class="timeline-now">00:00:00.000</output>
+                  <button type="button" id="add-sync-marker" class="marker-add" title="在播放头处保存同步检查点（M）">＋ 标记</button>
                   <div class="timeline-zoom" aria-label="时间线缩放">
                     <button type="button" id="zoom-out" aria-label="缩小时间线">−</button>
                     <output id="zoom-level">适应</output>
@@ -262,7 +263,7 @@
                 </div>
                 <div class="timeline-shell">
                   <div id="timeline-track-headings" class="timeline-track-headings"></div>
-                  <div id="timeline-viewport" class="timeline-viewport" tabindex="0" aria-label="可滚动的多轨同步时间线">
+                  <div id="timeline-viewport" class="timeline-viewport" tabindex="0" aria-label="多轨时间线：J 回退帧、K 暂停、L 播放、方向键逐帧、Alt 滚轮缩放">
                     <div id="timeline-content" class="timeline-content"></div>
                   </div>
                 </div>
