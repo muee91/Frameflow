@@ -154,6 +154,23 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.client.get(url + "?stream=2&channel=0").status_code, 422)
         self.assertEqual(self.client.get(url + "?stream=-1").status_code, 422)
 
+    def test_markers_persist_and_are_auth_bound(self):
+        project, result = self.publish_result()
+        url = f"/api/projects/{project['id']}/markers"
+        marker = self.client.post(url, json={
+            "group_id": "group-1", "time_seconds": 0.25, "label": "拍板"})
+        self.assertEqual(marker.status_code, 201, marker.text)
+        marker_id = marker.json()["id"]
+        self.assertEqual(len(self.client.get(url).json()), 1)
+        self.assertEqual(self.client.post(url, json={
+            "group_id": "__unmatched__", "time_seconds": 0.25}).status_code, 422)
+        self.assertEqual(self.client.get(f"/api/projects/{project['id']}/result").json()["revision"],
+                         result["revision"])
+        self.assertEqual(self.client.delete(url + "/" + marker_id).status_code, 200)
+        self.assertEqual(self.client.get(url).json(), [])
+        self.client.cookies.clear()
+        self.assertEqual(self.client.get(url).status_code, 401)
+
     def test_undo_review_is_authenticated_and_preserves_pending_gate(self):
         project, result = self.publish_result()
         cid = result["clips"][0]["id"]
