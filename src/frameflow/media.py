@@ -283,6 +283,17 @@ def probe_and_hash(item: dict, ctx) -> dict:
         "width": _positive_int(video.get("width")),
         "height": _positive_int(video.get("height")),
         "audio_channels": sum(_positive_int(stream.get("channels")) for stream in audios),
+        # Preserve distinct PCM/AAC streams and channels. A four-mono-stream
+        # camera must never be presented as one merged or stereo recording.
+        "audio_streams": [
+            {
+                "index": ordinal,
+                "channels": _positive_int(stream.get("channels")),
+                "codec": str(stream.get("codec_name") or "unknown")[:40],
+                "sample_rate": _positive_int(stream.get("sample_rate")),
+            }
+            for ordinal, stream in enumerate(audios)
+        ],
         "camera": item["camera"],
         "kind": item["kind"],
         "bytes": before["size"],
