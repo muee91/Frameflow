@@ -290,6 +290,11 @@
     $("start-sync").hidden = true;
     $("connection-notice").hidden = true;
     $("clip-grid").replaceChildren();
+    $("audio-pool").replaceChildren();
+    $("inspector-body").replaceChildren();
+    $("source-list").replaceChildren();
+    $("review-queue").replaceChildren();
+    $("timeline-content").replaceChildren();
   }
   function newProject() {
     resetProject();
@@ -645,6 +650,7 @@
     if (!state.result) return;
     state.reviewVisible = true;
     $("review-panel").hidden = false;
+    requestAnimationFrame(() => window.FrameflowTimeline?.refresh());
     $("export-panel").hidden = false;
     setStep(2);
     if (scroll)
@@ -1235,7 +1241,8 @@
     card.append(top, wrap, info);
     player.card = card;
     player.info = info;
-    card.addEventListener("click", () => selectClip(String(clip.id)));
+    top.addEventListener("click", () => selectClip(String(clip.id)));
+    wrap.addEventListener("click", () => selectClip(String(clip.id)));
     return card;
   }
   function sourcePosition(player, timeline = state.position) {
