@@ -231,6 +231,13 @@ def run_gate(artifacts: Path, timeout: float):
                     require(all(clip.get("offset_seconds") is not None and not clip.get("blocked_reason") for clip in clips),
                             "The fixture does not have playable mappings.")
                     require(page.locator(".clip-card").count() == len(clips), "The review UI omitted a clip.")
+                    require(page.locator(".track-clip").count() == len(clips), "The multi-track timeline omitted media segments.")
+                    require(page.locator("#inspector-body .clip-form").count() == 1, "The selected clip inspector did not open.")
+                    before_width = page.locator("#timeline-content").evaluate("node => node.getBoundingClientRect().width")
+                    page.locator("#zoom-in").click()
+                    require(page.locator("#timeline-content").evaluate("node => node.getBoundingClientRect().width") > before_width,
+                            "Zoom did not resize the shared timeline.")
+                    page.locator("#zoom-fit").click()
                     require(page.locator("#export-fcpxml").is_disabled(), "The UI allowed export before review.")
                     require(page.locator(".clip-form textarea").evaluate_all("items => items.every(item => item.value === '')"), "Human review reasons must not be prefilled as if playback had been verified.")
                     checkpoint("load-media")
@@ -276,7 +283,8 @@ def run_gate(artifacts: Path, timeout: float):
                         before_result = get_json(client, f"/api/projects/{project_id}/result")
                         before_position = float(page.locator("#timeline-seek").input_value())
                         before_monitor = page.locator("#audio-select").input_value()
-                        card = page.locator(".clip-card").filter(has=page.get_by_role("heading", name=correction_clip["name"], exact=True))
+                        page.locator("#source-list .source-item").filter(has_text=correction_clip["name"]).click()
+                        card = page.locator("#inspector-body")
                         card.get_by_label(f"{correction_clip['name']} 同步起点秒数", exact=True).fill(str(corrected_offset))
                         card.get_by_label(f"{correction_clip['name']} 核对备注", exact=True).fill("合成测试：应用修正后先试听，不提前审批")
                         if trial == 0:
@@ -313,7 +321,8 @@ def run_gate(artifacts: Path, timeout: float):
                             capture(page, artifacts, "04-correction-pending.png")
                     for index, clip in enumerate(clips):
                         checkpoint(f"review-clip-{index + 1}")
-                        card = page.locator(".clip-card").filter(has=page.get_by_role("heading", name=clip["name"], exact=True))
+                        page.locator("#source-list .source-item").filter(has_text=clip["name"]).click()
+                        card = page.locator("#inspector-body")
                         card.get_by_label(f"{clip['name']} 核对备注", exact=True).fill("合成测试：浏览器已播放并核对共同时间轴")
                         require(card.locator("form").evaluate("form => form.checkValidity()"),
                                 "Native form constraints rejected the exact engine offset or review input.")
