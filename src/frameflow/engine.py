@@ -172,6 +172,7 @@ def _clip(asset: dict) -> dict:
         "has_video": bool(asset.get("has_video")), "has_audio": bool(asset.get("has_audio")),
         "width": asset.get("width", 0), "height": asset.get("height", 0),
         "audio_channels": asset.get("audio_channels", 0),
+        "audio_streams": deepcopy(asset.get("audio_streams", [])),
         "group_id": None, "offset_seconds": None, "rate": 1.0,
         "status": "unmatched", "reason": "未找到足够的同步证据，请补充核对或明确排除。",
         "evidence": [], "engine_clip_id": None,
