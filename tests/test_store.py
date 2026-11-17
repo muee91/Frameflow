@@ -67,6 +67,25 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.store.undo_last_review(self.project_id, revision=undone["revision"], clip_id="clip-A")
 
+    def test_markers_are_project_scoped_and_never_change_review_revision(self):
+        _, result = self.publish()
+        marker = self.store.add_marker(
+            self.project_id, group_id="group-1", time_seconds=1.125, label="拍板")
+        self.assertEqual(marker["time_seconds"], 1.125)
+        self.assertEqual(len(self.store.markers(self.project_id)), 1)
+        self.assertEqual(self.store.result(self.project_id)["revision"], result["revision"])
+        with self.assertRaises(ValueError):
+            self.store.add_marker(self.project_id, group_id="unknown", time_seconds=0)
+        with self.assertRaises(ValueError):
+            self.store.add_marker(self.project_id, group_id="group-1", time_seconds=float("nan"))
+        other = self.store.create_project("隔离项目", [{
+            "path": str(self.media), "kind": "camera", "label": "B"}])
+        self.assertEqual(self.store.markers(other["id"]), [])
+        with self.assertRaises(KeyError):
+            self.store.delete_marker(other["id"], marker["id"])
+        self.store.delete_marker(self.project_id, marker["id"])
+        self.assertEqual(self.store.markers(self.project_id), [])
+
     def test_queued_cancellation_cannot_start_or_publish(self):
         job = self.store.create_job(self.project_id)
         self.store.cancel(job["id"])
