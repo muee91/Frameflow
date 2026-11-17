@@ -442,6 +442,67 @@ class Store:
             self._event(db, job, f"{action}：{clip['name']}", current_item=clip["name"])
         return result
 
+    def last_undoable_clip(self, project_id, revision, job_id):
+        """Undo is available only for the latest revision of this result."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT clip_id,revision,reason FROM reviews WHERE project_id=? AND job_id=? ORDER BY seq DESC LIMIT 1",
+                (project_id, job_id),
+            ).fetchone()
+        if row is None or row["revision"] != revision or row["reason"].startswith("撤销最近一次修订"):
+            return None
+        return row["clip_id"]
+
+    def undo_last_review(self, project_id, *, revision, clip_id):
+        """Revision-checked undo. Restore proposal, never silently reinstate approval."""
+        if type(revision) is not int or revision < 1 or not isinstance(clip_id, str) or not clip_id:
+            raise ValueError("撤销参数无效。")
+        with self.transaction() as db:
+            if db.execute(
+                "SELECT 1 FROM jobs WHERE project_id=? AND state IN ('queued','running','cancelling')",
+                (project_id,),
+            ).fetchone():
+                raise Conflict("有正在进行的任务，不能撤销核对。")
+            row = db.execute("SELECT * FROM results WHERE project_id=?", (project_id,)).fetchone()
+            if row is None:
+                raise KeyError(project_id)
+            if row["revision"] != revision:
+                raise Conflict("核对结果已经改变，请重新读取后再撤销。")
+            last = db.execute(
+                "SELECT * FROM reviews WHERE project_id=? AND job_id=? ORDER BY seq DESC LIMIT 1",
+                (project_id, row["job_id"]),
+            ).fetchone()
+            if (last is None or last["revision"] != revision or
+                    last["clip_id"] != clip_id or last["reason"].startswith("撤销最近一次修订")):
+                raise Conflict("只能撤销本次同步的最近一条人工核对操作。")
+            result = json.loads(row["payload_json"])
+            current = next((c for c in result["clips"] if c["id"] == clip_id), None)
+            if current is None or encode(current) != last["replacement_json"]:
+                raise Conflict("素材状态发生变化，不能安全撤销。")
+            restored = json.loads(last["previous_json"])
+            # Previously approved or excluded data must not regain export authority
+            # through an undo; it must be replayed and explicitly approved.
+            if restored["status"] in {"approved", "excluded"}:
+                restored["status"] = "proposed"
+            restored["review_reason"] = "已撤销上次修改，仍待重新播放核对。"
+            result["clips"] = [restored if c["id"] == clip_id else c for c in result["clips"]]
+            result["revision"] = revision + 1
+            reason = f"撤销最近一次修订 #{last['seq']}，重新播放核对"
+            db.execute("UPDATE results SET revision=?,payload_json=? WHERE project_id=?",
+                       (revision + 1, encode(result), project_id))
+            db.execute(
+                "INSERT INTO reviews(project_id,job_id,revision,clip_id,created_at,previous_json,replacement_json,reason) VALUES(?,?,?,?,?,?,?,?)",
+                (project_id, result["job_id"], revision + 1, clip_id, time.time(),
+                 encode(current), encode(restored), reason),
+            )
+            job = self._job(db, result["job_id"])
+            done = sum(c["status"] in {"approved", "excluded"} for c in result["clips"])
+            job.update(completed=done, total=len(result["clips"]), state="needs_review",
+                       progress_at=time.time(), message="修改已撤销，等待重新核对。")
+            self._save_job(db, job)
+            self._event(db, job, f"撤销最近修订：{restored['name']}", current_item=restored["name"])
+        return result
+
     def review_history(self, project_id):
         with self.connect() as db:
             return [dict(row) for row in db.execute(
