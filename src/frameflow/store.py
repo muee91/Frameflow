@@ -71,6 +71,14 @@ class Store:
                     clip_id TEXT NOT NULL, created_at REAL NOT NULL,
                     previous_json TEXT NOT NULL, replacement_json TEXT NOT NULL, reason TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS markers (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    group_id TEXT NOT NULL, time_seconds REAL NOT NULL,
+                    label TEXT NOT NULL, created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS markers_project_group_time
+                  ON markers(project_id,group_id,time_seconds);
                 PRAGMA user_version=1;
             """)
 
@@ -512,6 +520,44 @@ class Store:
             self._save_job(db, job)
             self._event(db, job, f"撤销最近修订：{restored['name']}", current_item=restored["name"])
         return result
+
+    def markers(self, project_id):
+        self.project(project_id)
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT id,group_id,time_seconds,label,created_at FROM markers "
+                "WHERE project_id=? ORDER BY group_id,time_seconds,id", (project_id,))]
+
+    def add_marker(self, project_id, *, group_id, time_seconds, label="标记"):
+        if not isinstance(group_id, str) or not group_id or len(group_id) > 128:
+            raise ValueError("请选择有效同步组。")
+        if (type(time_seconds) not in {int, float} or not math.isfinite(time_seconds) or
+                abs(time_seconds) > 7 * 86400):
+            raise ValueError("标记位置无效。")
+        if not isinstance(label, str) or not label.strip() or len(label.strip()) > 64:
+            raise ValueError("标记名称必须为 1–64 字。")
+        result = self.result(project_id)
+        if group_id not in {g["id"] for g in result.get("groups", [])}:
+            raise ValueError("当前同步组不存在。")
+        marker = {
+            "id": uuid.uuid4().hex, "group_id": group_id, "time_seconds": time_seconds,
+            "label": label.strip(), "created_at": time.time(),
+        }
+        with self.transaction() as db:
+            db.execute("INSERT INTO markers VALUES(?,?,?,?,?,?)",
+                       (marker["id"], project_id, group_id, time_seconds,
+                        marker["label"], marker["created_at"]))
+        return marker
+
+    def delete_marker(self, project_id, marker_id):
+        with self.transaction() as db:
+            row = db.execute(
+                "DELETE FROM markers WHERE project_id=? AND id=? RETURNING id",
+                (project_id, marker_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(marker_id)
+        return {"deleted": marker_id}
 
     def review_history(self, project_id):
         with self.connect() as db:
