@@ -111,6 +111,25 @@ class MediaTests(unittest.TestCase):
             self.assertEqual(error.exception.code, "ROOT_UNREADABLE")
 
     @unittest.skipUnless(shutil.which("ffprobe"), "real media probe requires ffprobe")
+    def test_probe_keeps_two_independent_mono_streams(self):
+        if not shutil.which("ffmpeg"):
+            self.skipTest("FFmpeg is required to create multi-stream source")
+        import subprocess
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "two-mono.mov"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+                "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=2",
+                "-map", "0:a:0", "-map", "1:a:0", "-c:a", "pcm_s16le", str(path),
+            ], check=True, timeout=30)
+            asset = probe_and_hash(item(path), Context())
+            self.assertEqual(asset["audio_channels"], 2)
+            self.assertEqual(len(asset["audio_streams"]), 2)
+            self.assertEqual([stream["index"] for stream in asset["audio_streams"]], [0, 1])
+            self.assertEqual([stream["channels"] for stream in asset["audio_streams"]], [1, 1])
+            self.assertTrue(all(s["sample_rate"] == 48000 for s in asset["audio_streams"]))
+
     def test_real_wav_metadata_and_full_hash_survive_a_new_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "recording.wav"
