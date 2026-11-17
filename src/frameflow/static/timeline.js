@@ -48,7 +48,7 @@
         const start = number(clip.offset_seconds);
         const duration = number(clip.duration);
         const rate = number(clip.rate) ?? 1;
-        if (start === null || duration === null || duration <= 0 || rate <= 0) continue;
+        if (clip.blocked_reason || start === null || duration === null || duration <= 0 || rate <= 0) continue;
         let row = ends.findIndex((end) => end <= start + 0.0001);
         if (row === -1) row = ends.length;
         ends[row] = start + duration * rate;
@@ -161,10 +161,10 @@
         const offset = number(clip.offset_seconds);
         const duration = number(clip.duration);
         const rate = number(clip.rate) ?? 1;
-        if (offset === null || duration === null || duration <= 0 || rate <= 0) {
-          const missing = pick("button", "track-unmatched", clip.name || "未定位素材");
+        if (clip.blocked_reason || offset === null || duration === null || duration <= 0 || rate <= 0) {
+          const missing = pick("button", "track-unmatched" + (clip.blocked_reason ? " is-blocked" : ""), clip.name || "未定位素材");
           missing.type = "button";
-          missing.title = "尚无同步位置，选择后人工处理";
+          missing.title = clip.blocked_reason ? "映射存在无法表达的局部变化，不展示虚假的连续同步位置" : "尚无同步位置，选择后人工处理";
           missing.addEventListener("click", () => model.onSelect?.(String(clip.id)));
           lane.append(missing);
           continue;
