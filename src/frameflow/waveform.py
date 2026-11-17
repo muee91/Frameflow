@@ -13,18 +13,23 @@ import threading
 from .errors import TaskError
 
 _WAVEFORM_LOCK = threading.Lock()
-_FILTER_VERSION = "showwavespic-1024x66-v1"
+_FILTER_VERSION = "showwavespic-stream-channel-1024x66-v2"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
-def cached_waveform(path: Path, cache_root: Path, media_id: str, signature: dict) -> Path:
+def cached_waveform(path: Path, cache_root: Path, media_id: str, signature: dict, *,
+                    stream_index: int = 0, channel_index: int | None = None) -> Path:
     """Only render caller-authorized media. Never ship a synthetic waveform as evidence."""
+    if (type(stream_index) is not int or not 0 <= stream_index < 32 or
+            (channel_index is not None and (type(channel_index) is not int or not 0 <= channel_index < 32))):
+        raise TaskError("WAVEFORM_SELECTION_INVALID", "音轨选择超出允许范围。", retryable=False)
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise TaskError("FFMPEG_MISSING", "无法生成音频波形：本机缺少 FFmpeg。", retryable=False)
     cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     key = hashlib.sha256(json.dumps(
-        {"id": media_id, "signature": signature, "filter": _FILTER_VERSION},
+        {"id": media_id, "signature": signature, "filter": _FILTER_VERSION,
+         "stream": stream_index, "channel": channel_index},
         ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
     output = cache_root / (key + ".png")
@@ -37,12 +42,16 @@ def cached_waveform(path: Path, cache_root: Path, media_id: str, signature: dict
         os.close(handle)
         temp_path = Path(temporary)
         try:
+            # Explicit stream and channel: never merge four independent mono
+            # streams when inspecting recorder/camera audio evidence.
+            source = f"[0:a:{stream_index}]"
+            selector = (f"pan=mono|c0=c{channel_index}" if channel_index is not None
+                        else "aformat=channel_layouts=mono")
             command = [
                 ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
                 "-threads", "1", "-i", str(path),
                 "-filter_complex",
-                "[0:a:0]aformat=channel_layouts=mono,"
-                "showwavespic=s=1024x66:colors=white:scale=sqrt[wave]",
+                source + selector + ",showwavespic=s=1024x66:colors=white:scale=sqrt[wave]",
                 "-map", "[wave]", "-frames:v", "1", "-update", "1",
                 "-y", str(temp_path),
             ]
