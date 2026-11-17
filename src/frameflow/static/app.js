@@ -18,6 +18,7 @@
     selectedGroup: null,
     selectedClipId: null,
     inspectorPlayer: null,
+    markers: [],
     players: new Map(),
     playing: false,
     buffering: false,
@@ -282,6 +283,7 @@
     state.reviewVisible = false;
     state.selectedClipId = null;
     state.inspectorPlayer = null;
+    state.markers = [];
     document.body.classList.remove("workspace-active");
     state.players.clear();
     $("review-panel").hidden = true;
@@ -637,6 +639,7 @@
       state.result = result;
       state.loadedResultJob = result.job_id || jobId;
       renderResult();
+      await loadMarkers(generation);
       $("open-review").hidden = false;
       if (reveal) revealReview(false);
     } catch (error) {
@@ -660,6 +663,47 @@
           : "smooth",
         block: "start",
       });
+  }
+  function selectedMarkers() {
+    return state.markers.filter(marker => marker.group_id === state.selectedGroup);
+  }
+  async function loadMarkers(generation = state.generation) {
+    if (!state.project) return;
+    try {
+      const markers = await request(
+        "/api/projects/" + encodeURIComponent(state.project.id) + "/markers");
+      if (generation !== state.generation) return;
+      state.markers = Array.isArray(markers) ? markers : [];
+      window.FrameflowTimeline?.setMarkers(selectedMarkers());
+    } catch (_) {
+      // Markers are optional review notes, never a dependency for sync.
+    }
+  }
+  async function addSyncMarker() {
+    if (!state.project || !state.result || !state.reviewVisible ||
+        !state.selectedGroup || state.selectedGroup.startsWith("__")) return;
+    const generation = state.generation;
+    try {
+      const marker = await post(
+        "/api/projects/" + encodeURIComponent(state.project.id) + "/markers",
+        { group_id: state.selectedGroup, time_seconds: state.position, label: "同步检查点" },
+      );
+      if (generation !== state.generation) return;
+      state.markers.push(marker);
+      window.FrameflowTimeline?.setMarkers(selectedMarkers());
+    } catch (error) { showNotice(error.message, "warning"); }
+  }
+  async function deleteSyncMarker(id) {
+    if (!state.project) return;
+    const generation = state.generation;
+    try {
+      await request(
+        "/api/projects/" + encodeURIComponent(state.project.id) +
+        "/markers/" + encodeURIComponent(id), { method: "DELETE" });
+      if (generation !== state.generation) return;
+      state.markers = state.markers.filter(marker => marker.id !== id);
+      window.FrameflowTimeline?.setMarkers(selectedMarkers());
+    } catch (error) { showNotice(error.message, "warning"); }
   }
   function renderResult() {
     if (!state.result) return;
@@ -902,6 +946,8 @@
       end: state.end,
       position: state.position,
       selected: state.selectedClipId,
+      markers: selectedMarkers(),
+      onDeleteMarker: deleteSyncMarker,
       onSelect: selectClip,
       onSeek: (position) => {
         pausePlayback();
@@ -1570,6 +1616,9 @@
     } else if (key === "l" && !event.shiftKey) {
       event.preventDefault();
       if (!state.playing) togglePlay();
+    } else if (key === "m" && !event.shiftKey) {
+      event.preventDefault();
+      addSyncMarker();
     } else if (key === "j" && !event.shiftKey) {
       event.preventDefault();
       stepTimeline(-1);
@@ -1745,6 +1794,7 @@
         player.media.muted = String(player.clip.id) !== $("audio-select").value;
     });
     $("toggle-play").addEventListener("click", togglePlay);
+    $("add-sync-marker").addEventListener("click", addSyncMarker);
     $("timeline-seek").addEventListener("input", (event) => {
       const requestedPosition = numeric(event.target.value, state.start);
       pausePlayback();
