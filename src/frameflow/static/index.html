@@ -7,6 +7,7 @@
     <title>Frameflow · 多机位同步</title>
     <link rel="stylesheet" href="/static/style.css" />
     <script src="/static/app.js" defer></script>
+    <script src="/static/timeline.js" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">跳到主要内容</a>
@@ -208,63 +209,84 @@
             </ol>
           </details>
         </section>
-        <section
-          id="review-panel"
-          class="panel review-panel"
-          aria-labelledby="review-title"
-          hidden
-        >
-          <div class="section-heading">
+        <section id="review-panel" class="panel review-panel" aria-labelledby="review-title" hidden>
+          <div class="studio-heading">
             <div>
-              <span class="eyebrow">看一遍，才算对齐</span>
-              <h2 id="review-title">播放核对</h2>
+              <span class="eyebrow">SYNC WORKSPACE</span>
+              <h2 id="review-title">多机位同步</h2>
             </div>
             <div class="review-count" id="review-count"></div>
+            <span id="result-revision" class="subtle revision-tag"></span>
           </div>
-          <p class="review-intro">
-            选择一组素材，按同一时间播放。检查口型、动作与声音，再确认位置。播放兼容性取决于浏览器与素材编码。
-          </p>
-          <div id="result-warnings" class="result-warnings" hidden></div>
+          <div id="result-warnings" class="result-warnings" role="status" hidden></div>
           <div class="review-toolbar">
-            <label class="field inline-field" for="group-select"
-              ><span>同步组</span
-              ><select id="group-select"></select></label
-            ><label class="field inline-field" for="audio-select"
-              ><span>监听声音</span
-              ><select id="audio-select">
-                <option value="">静音</option>
-              </select></label
-            ><span class="subtle" id="group-summary"></span>
+            <label class="field inline-field" for="group-select">
+              <span>同步组</span><select id="group-select"></select>
+            </label>
+            <label class="field inline-field" for="audio-select">
+              <span>监听音轨</span>
+              <select id="audio-select"><option value="">静音</option></select>
+            </label>
+            <span class="subtle" id="group-summary"></span>
           </div>
-          <div class="transport">
-            <button
-              id="toggle-play"
-              class="button primary compact"
-              type="button"
-              aria-label="播放当前同步组"
-            >
-              播放</button
-            ><label class="sr-only" for="timeline-seek">同步组时间轴</label
-            ><input
-              type="range"
-              id="timeline-seek"
-              min="0"
-              max="1"
-              value="0"
-              step="0.001"
-            /><output id="timeline-time" for="timeline-seek">00:00.000</output
-            ><span class="timeline-duration" id="timeline-duration"></span>
+          <div class="studio-layout">
+            <aside class="studio-rail" aria-label="素材轨道">
+              <div class="rail-heading"><span>来源</span><span id="rail-count"></span></div>
+              <div id="source-list" class="source-list"></div>
+              <div class="rail-heading rail-secondary"><span>核对队列</span></div>
+              <div id="review-queue" class="review-queue"></div>
+            </aside>
+            <div class="studio-center">
+              <section class="monitor-zone" aria-label="多机位同步监看">
+                <div class="zone-heading"><strong>同步监看</strong><span>音轨单路监听</span></div>
+                <div id="clip-grid" class="clip-grid"></div>
+                <div class="transport">
+                  <button id="toggle-play" class="button primary compact" type="button" aria-label="播放当前同步组">播放</button>
+                  <label class="sr-only" for="timeline-seek">同步组播放位置</label>
+                  <input type="range" id="timeline-seek" min="0" max="1" value="0" step="0.001" />
+                  <output id="timeline-time" for="timeline-seek">00:00.000</output>
+                  <span class="timeline-duration" id="timeline-duration"></span>
+                </div>
+                <p id="playback-help" class="field-help" aria-live="polite"></p>
+              </section>
+              <section class="studio-timeline" aria-label="同步时间线">
+                <div class="timeline-toolbar">
+                  <strong>同步时间线</strong>
+                  <output id="timeline-playhead-time" class="timeline-now">00:00:00.000</output>
+                  <div class="timeline-zoom" aria-label="时间线缩放">
+                    <button type="button" id="zoom-out" aria-label="缩小时间线">−</button>
+                    <output id="zoom-level">适应</output>
+                    <button type="button" id="zoom-in" aria-label="放大时间线">+</button>
+                    <button type="button" id="zoom-fit">适应</button>
+                  </div>
+                </div>
+                <div class="timeline-shell">
+                  <div id="timeline-track-headings" class="timeline-track-headings"></div>
+                  <div id="timeline-viewport" class="timeline-viewport" tabindex="0" aria-label="可滚动的多轨同步时间线">
+                    <div id="timeline-content" class="timeline-content"></div>
+                  </div>
+                </div>
+                <p id="timeline-empty" class="timeline-empty" hidden>当前同步组没有素材。</p>
+                <div class="timeline-legend">
+                  <span><i class="legend-camera"></i>机位</span>
+                  <span><i class="legend-recorder"></i>独立录音</span>
+                  <span><i class="legend-alert"></i>待核对 / 异常</span>
+                  <span>拖动片段可预览偏移，应用后需要重新核对</span>
+                </div>
+              </section>
+            </div>
+            <aside class="inspector-pane" aria-label="选中片段检查器">
+              <div class="inspector-heading">
+                <span class="eyebrow">INSPECTOR</span>
+                <strong id="inspector-title">片段检查器</strong>
+                <span id="inspector-status" class="subtle"></span>
+              </div>
+              <div id="inspector-body" class="inspector-body">
+                <p class="inspector-empty">选择轨道上的素材查看同步信息。</p>
+              </div>
+            </aside>
           </div>
-          <p class="field-help" id="playback-help">
-            公共时间轴只控制有同步位置的素材；每个窗口显示当前源片位置。开始播放时仅监听所选音轨。
-          </p>
-          <div id="clip-grid" class="clip-grid"></div>
-          <div class="review-footnote">
-            <span id="result-revision" class="subtle"></span
-            ><span class="subtle"
-              >人工修正会保留记录，并使旧的核对结果失效。</span
-            >
-          </div>
+          <div id="audio-pool" class="audio-pool" aria-hidden="true"></div>
         </section>
         <section
           id="export-panel"
