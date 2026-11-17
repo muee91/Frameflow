@@ -6,6 +6,7 @@
     clips: [], projectId: "", start: 0, end: 1, position: 0,
     zoom: 1, group: "", selected: null, width: 1, playhead: null,
     onSelect: null, onSeek: null, onDragOffset: null,
+    markers: [], onDeleteMarker: null,
   };
   const pick = (tag, cls, text) => {
     const node = document.createElement(tag);
@@ -308,6 +309,30 @@
       }
       content.append(lane);
     }
+    for (const saved of model.markers) {
+      const time = number(saved.time_seconds);
+      if (time === null || time < model.start || time > model.end) continue;
+      const x = ratio(time) * 100 + "%";
+      const line = pick("div", "timeline-marker-line");
+      line.style.left = x;
+      line.setAttribute("aria-hidden", "true");
+      content.append(line);
+      const button = pick("button", "timeline-marker", "◆");
+      button.type = "button";
+      button.style.left = x;
+      button.title = (saved.label || "同步检查点") + " · " + unit(time, true) + "（右键删除）";
+      button.setAttribute("aria-label", "跳转到" + unit(time, true) + "的同步标记");
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        model.onSeek?.(time);
+      });
+      button.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        if (window.confirm("删除此同步检查点？"))
+          model.onDeleteMarker?.(String(saved.id));
+      });
+      content.append(button);
+    }
     const marker = pick("div", "track-playhead");
     marker.setAttribute("aria-hidden", "true");
     content.append(marker);
@@ -347,8 +372,14 @@
     model.onSeek = options.onSeek;
     model.onDragOffset = options.onDragOffset;
     model.selected = options.selected || null;
+    model.markers = options.markers || [];
+    model.onDeleteMarker = options.onDeleteMarker || null;
     if (changed) model.zoom = 1;
     render();
+  }
+  function setMarkers(markers) {
+    model.markers = Array.isArray(markers) ? markers : [];
+    if (model.clips.length) render();
   }
   let initialized = false;
   function init() {
@@ -367,5 +398,5 @@
     });
   }
   init();
-  window.FrameflowTimeline = { mount, setPosition, selectClip, refresh: render };
+  window.FrameflowTimeline = { mount, setPosition, selectClip, setMarkers, refresh: render };
 })();
