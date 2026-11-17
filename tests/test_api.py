@@ -165,6 +165,28 @@ class APITests(unittest.TestCase):
         response = self.client.get(f"/api/jobs/{export['id']}/download")
         self.assertEqual(response.status_code, 404)
 
+    def test_apply_correction_is_playable_but_not_approved_or_exportable(self):
+        project, result = self.publish_result()
+        base = f"/api/projects/{project['id']}"
+        clip = result["clips"][0]
+        request = {"revision": result["revision"], "clip_id": clip["id"], "status": "proposed",
+                   "offset_seconds": 0.04, "reason": "应用修正，等待实际试听。"}
+        response = self.client.post(base + "/review", json=request)
+        self.assertEqual(response.status_code, 200, response.text)
+        pending = response.json()
+        corrected = pending["clips"][0]
+        self.assertEqual(corrected["status"], "proposed")
+        self.assertEqual(corrected["offset_seconds"], 0.04)
+        self.assertEqual(self.client.get(corrected["media_url"]).status_code, 200)
+        self.assertEqual(self.client.get(base + "/result").json(), pending)
+        self.assertEqual(self.client.post(base + "/review", json=request).status_code, 409)
+        self.assertEqual(self.client.get(base + "/export").status_code, 409)
+        self.assertEqual(self.client.post(base + "/exports", json={"revision": pending["revision"]}).status_code, 409)
+        result = self.approve(project, pending)
+        manifest = self.client.get(base + "/export").json()
+        self.assertEqual(manifest["revision"], result["revision"])
+        self.assertEqual(manifest["review_history"][0]["reason"], request["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -368,8 +368,8 @@ class Store:
     def review(self, project_id, *, revision, clip_id, status, offset_seconds=None, reason="", group_id=None):
         if type(revision) is not int or revision < 1:
             raise ValueError("结果版本必须是正整数。")
-        if status not in {"approved", "excluded"}:
-            raise ValueError("请选择确认或排除。")
+        if status not in {"proposed", "approved", "excluded"}:
+            raise ValueError("请选择应用修正、确认或排除。")
         reason = reason.strip()
         if not reason or len(reason) > 1000:
             raise ValueError("请填写 1–1000 字的核对依据或排除原因。")
@@ -390,11 +390,11 @@ class Store:
                 raise KeyError(clip_id)
             previous = encode(clip)
             target_group = group_id or clip.get("group_id")
-            if status == "approved":
+            if status in {"proposed", "approved"}:
                 if clip.get("blocked_reason"):
                     raise ValueError("此片段含尚未支持的时间映射，请保留待处理或排除。")
                 if target_group not in {g["id"] for g in result["groups"]}:
-                    raise ValueError("请指定一个已有同步组后再确认。")
+                    raise ValueError("请指定一个已有同步组后再应用或确认。")
                 target_offset = offset_seconds if offset_seconds is not None else clip.get("offset_seconds")
                 if target_offset is None:
                     raise ValueError("未匹配片段需要明确的人工偏移。")
@@ -438,7 +438,8 @@ class Store:
             job["state"] = "succeeded" if done == len(result["clips"]) else "needs_review"
             job["message"] = "全部片段已核对，交付仍需目标软件验收。" if job["state"] == "succeeded" else "继续核对剩余片段。"
             self._save_job(db, job)
-            self._event(db, job, f"已保存人工核对：{clip['name']}", current_item=clip["name"])
+            action = "已应用修正，仍待播放核对" if status == "proposed" else "已保存人工核对"
+            self._event(db, job, f"{action}：{clip['name']}", current_item=clip["name"])
         return result
 
     def review_history(self, project_id):

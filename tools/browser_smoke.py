@@ -269,6 +269,48 @@ def run_gate(artifacts: Path, timeout: float):
                     page.set_viewport_size({"width": 390, "height": 844})
                     capture(page, artifacts, "03-review-mobile.png")
                     page.set_viewport_size({"width": 1440, "height": 1050})
+                    correction_clip = next(clip for clip in clips if clip["has_video"])
+                    original_offset = correction_clip["offset_seconds"]
+                    for trial, corrected_offset in enumerate((original_offset + 0.04, original_offset)):
+                        checkpoint("apply-pending-correction" if trial == 0 else "restore-known-synthetic-position")
+                        before_result = get_json(client, f"/api/projects/{project_id}/result")
+                        before_position = float(page.locator("#timeline-seek").input_value())
+                        before_monitor = page.locator("#audio-select").input_value()
+                        card = page.locator(".clip-card").filter(has=page.get_by_role("heading", name=correction_clip["name"], exact=True))
+                        card.get_by_label(f"{correction_clip['name']} 同步起点秒数", exact=True).fill(str(corrected_offset))
+                        card.get_by_label(f"{correction_clip['name']} 核对备注", exact=True).fill("合成测试：应用修正后先试听，不提前审批")
+                        if trial == 0:
+                            card.get_by_role("button", name="确认位置", exact=True).click()
+                            page.get_by_text("请先应用修正，按新位置播放核对后再确认。", exact=True).wait_for(state="visible")
+                            require(get_json(client, f"/api/projects/{project_id}/result")["revision"] == before_result["revision"],
+                                    "Unapplied input was approved without playback at the persisted position.")
+                        with page.expect_response(lambda response: response.url == f"{origin}/api/projects/{project_id}/review"
+                                                  and response.request.method == "POST") as applied:
+                            card.get_by_role("button", name="应用修正（待核对）", exact=True).click()
+                        require(applied.value.status == 200, "A pending correction could not be saved.")
+                        pending = applied.value.json()
+                        corrected = next(clip for clip in pending["clips"] if clip["id"] == correction_clip["id"])
+                        require(corrected["status"] == "proposed" and abs(corrected["offset_seconds"] - corrected_offset) < 1e-9,
+                                "Applying a correction either approved it or lost its new position.")
+                        page.wait_for_function("(revision) => document.querySelector('#result-revision').textContent.includes('修订 ' + revision)", arg=pending["revision"])
+                        require(abs(float(page.locator("#timeline-seek").input_value()) - before_position) < 0.02,
+                                "Applying a correction lost the playback checkpoint.")
+                        require(page.locator("#audio-select").input_value() == before_monitor,
+                                "Applying a correction changed the monitoring source.")
+                        require(page.locator("#export-fcpxml").is_disabled() and client.get(f"/api/projects/{project_id}/export").status_code == 409,
+                                "A pending correction bypassed the export gate.")
+                        expected = {clip["name"]: (before_position - clip["offset_seconds"]) / clip["rate"] for clip in pending["clips"]}
+                        page.wait_for_function("""(expected) => [...document.querySelectorAll('.clip-card')].every(card => {
+                            const media = card.querySelector('video, audio');
+                            return !media.seeking && media.readyState >= 2 && Math.abs(media.currentTime - expected[card.querySelector('h3').textContent]) < 0.12;
+                        })""", arg=expected, timeout=15_000)
+                        before = page.locator(".clip-card video").evaluate_all("items => items.map(item => item.currentTime)")
+                        page.locator("#toggle-play").click()
+                        page.wait_for_function("""(before) => [...document.querySelectorAll('.clip-card video')].every((media, index) =>
+                            !media.paused && media.currentTime > before[index] + 0.4)""", arg=before, timeout=15_000)
+                        page.locator("#toggle-play").click()
+                        if trial == 0:
+                            capture(page, artifacts, "04-correction-pending.png")
                     for index, clip in enumerate(clips):
                         checkpoint(f"review-clip-{index + 1}")
                         card = page.locator(".clip-card").filter(has=page.get_by_role("heading", name=clip["name"], exact=True))

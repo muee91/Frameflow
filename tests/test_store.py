@@ -179,6 +179,39 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(json.loads(audit[1]["previous_json"])["mapping"], first_clip["mapping"])
         self.assertEqual(json.loads(audit[1]["replacement_json"])["mapping"], second_clip["mapping"])
 
+    def test_pending_correction_is_audited_and_reopens_export_gate_until_reapproved(self):
+        job, result = self.publish()
+        result = self.store.review(self.project_id, revision=result["revision"], clip_id="clip-A",
+                                   status="approved", reason="已核对合成位置。")
+        result = self.store.review(self.project_id, revision=result["revision"], clip_id="clip-B",
+                                   status="excluded", reason="本轮无共同内容。")
+        self.store.require_exportable(self.project_id)
+        previous = deepcopy(result)
+        request = dict(revision=result["revision"], clip_id="clip-A", status="proposed",
+                       offset_seconds=0.04, reason="先应用一帧修正，等待试听。")
+        pending = self.store.review(self.project_id, **request)
+        clip = pending["clips"][0]
+        self.assertEqual(clip["status"], "proposed")
+        self.assertEqual(clip["offset_seconds"], 0.04)
+        self.assertEqual(clip["suggested_offset_seconds"], 0.0)
+        self.assertIn("manual", clip["evidence"])
+        self.assertEqual(pending["revision"], previous["revision"] + 1)
+        self.assertEqual(self.store.job(job["id"])["state"], "needs_review")
+        self.assertEqual(self.store.job(job["id"])["completed"], 1)
+        with self.assertRaises(Conflict):
+            self.store.require_exportable(self.project_id)
+        with self.assertRaises(Conflict):
+            self.store.review(self.project_id, **request)
+        with self.store.connect() as db:
+            audit = db.execute("SELECT previous_json,replacement_json FROM reviews ORDER BY seq DESC LIMIT 1").fetchone()
+        self.assertEqual(json.loads(audit["previous_json"]), previous["clips"][0])
+        self.assertEqual(json.loads(audit["replacement_json"]), clip)
+        reapproved = self.store.review(self.project_id, revision=pending["revision"], clip_id="clip-A",
+                                      status="approved", reason="试听后确认。")
+        self.assertEqual(reapproved["clips"][0]["mapping"], clip["mapping"])
+        self.assertEqual(self.store.require_exportable(self.project_id), reapproved)
+        self.assertEqual(self.store.job(job["id"])["state"], "succeeded")
+
     def test_review_rejects_invalid_values_without_mutation(self):
         _, original = self.publish()
         defaults = {"revision": original["revision"], "clip_id": "clip-A", "status": "approved", "reason": "已核对。"}

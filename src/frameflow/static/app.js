@@ -855,6 +855,7 @@
       if (state.players.get(String(clip.id)) !== player) return;
       player.failed = true;
       if (player.approveButton) player.approveButton.disabled = true;
+      if (player.applyButton) player.applyButton.disabled = true;
       playbackError.hidden = false;
       if (state.playing) {
         pausePlayback();
@@ -943,6 +944,8 @@
           `无法自动交付：${clip.blocked_reason}。请单独核对，当前可排除。`,
         ),
       );
+    if (clip.status === "proposed" && clip.review_reason)
+      info.append(element("p", "clip-reason", `修正依据：${clip.review_reason} · 仍待播放核对`));
     const form = element("form", "clip-form");
     const offsetLabel = element("label", "field");
     offsetLabel.append(element("span", "", "在同步组中的起点（秒）"));
@@ -1006,9 +1009,11 @@
     const approve = element(
       "button",
       "button primary compact",
-      clip.status === "approved" ? "保存修正并确认" : "确认位置",
+      "确认位置",
     );
     approve.type = "submit";
+    const apply = element("button", "button quiet compact", "应用修正（待核对）");
+    apply.type = "button";
     const exclude = element(
       "button",
       "button quiet compact",
@@ -1016,17 +1021,19 @@
     );
     exclude.type = "button";
     player.approveButton = approve;
+    player.applyButton = apply;
     approve.disabled = Boolean(clip.blocked_reason || player.failed);
+    apply.disabled = Boolean(clip.blocked_reason || player.failed);
     offset.disabled = Boolean(clip.blocked_reason);
     nudge.disabled = Boolean(clip.blocked_reason);
     nudgeBack.disabled = Boolean(clip.blocked_reason);
     if (groupInput) groupInput.disabled = Boolean(clip.blocked_reason);
-    actions.append(approve, exclude);
+    actions.append(apply, approve, exclude);
     form.append(actions);
     const save = async (status) => {
-      if (status === "approved" && (clip.blocked_reason || player.failed)) {
+      if (status !== "excluded" && (clip.blocked_reason || player.failed)) {
         showNotice(
-          "当前素材无法在此页完成播放核对，不能确认；可修复播放问题或明确排除。",
+          "当前素材无法在此页完成播放核对，不能应用或确认；可修复播放问题或明确排除。",
           "warning",
         );
         return;
@@ -1034,13 +1041,18 @@
       const offsetValue = numeric(offset.value);
       const groupValue = groupInput ? groupInput.value : clip.group_id;
       if (
-        status === "approved" &&
+        status !== "excluded" &&
         (offsetValue === null ||
           groupValue === "" ||
           groupValue === null ||
           groupValue === undefined)
       ) {
-        showNotice("确认位置前，请填写有效起点并选择同步组。", "warning");
+        showNotice("应用或确认位置前，请填写有效起点并选择同步组。", "warning");
+        return;
+      }
+      if (status === "approved" &&
+          (offsetValue !== numeric(clip.offset_seconds) || groupValue !== clip.group_id)) {
+        showNotice("请先应用修正，按新位置播放核对后再确认。", "warning");
         return;
       }
       if (!reason.value.trim()) {
@@ -1049,7 +1061,11 @@
         return;
       }
       pausePlayback();
+      const position = state.position;
+      const selectedGroup = state.selectedGroup;
+      const selectedAudio = $("audio-select").value;
       approve.disabled = true;
+      apply.disabled = true;
       exclude.disabled = true;
       const generation = state.generation;
       try {
@@ -1073,12 +1089,21 @@
         if (generation !== state.generation) return;
         if (answer && Array.isArray(answer.clips)) {
           state.result = answer;
+          if (status === "proposed") state.selectedGroup = String(groupValue);
           renderResult();
         } else await loadResult(generation);
+        if (state.selectedGroup === selectedGroup) {
+          if ([...$("audio-select").options].some(option => option.value === selectedAudio))
+            $("audio-select").value = selectedAudio;
+          state.position = Math.min(state.end, Math.max(state.start, position));
+          updateTransport();
+        }
         showNotice(
           status === "approved"
-            ? "位置已保存。修正与核对记录已更新。"
-            : "已明确排除该素材，交付时会记录排除状态。",
+            ? "位置已确认，核对记录已更新。"
+            : status === "proposed"
+              ? "修正已应用，仍待核对。请按新位置播放，核对后再确认。"
+              : "已明确排除该素材，交付时会记录排除状态。",
         );
       } catch (error) {
         if (generation !== state.generation) return;
@@ -1091,6 +1116,7 @@
         } else showNotice(error.message, "error");
       } finally {
         approve.disabled = Boolean(clip.blocked_reason || player.failed);
+        apply.disabled = Boolean(clip.blocked_reason || player.failed);
         exclude.disabled = false;
       }
     };
@@ -1098,6 +1124,7 @@
       event.preventDefault();
       save("approved");
     });
+    apply.addEventListener("click", () => save("proposed"));
     exclude.addEventListener("click", () => save("excluded"));
     info.append(form);
     info.append(
@@ -1105,7 +1132,7 @@
         "p",
         "clip-annotation",
         mapped
-          ? `起点 ${numeric(clip.offset_seconds).toFixed(3)} s · 修改后保存才会更新公共时间轴`
+          ? `起点 ${numeric(clip.offset_seconds).toFixed(3)} s · 修改后先应用并播放，再确认位置`
           : "未匹配素材不会自动填入零偏移。",
       ),
     );
