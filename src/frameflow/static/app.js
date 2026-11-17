@@ -741,6 +741,7 @@
   }
   function hasMapping(clip) {
     return (
+      !clip.blocked_reason &&
       numeric(clip.offset_seconds) !== null &&
       numeric(clip.rate, 1) > 0 &&
       clip.group_id !== null &&
