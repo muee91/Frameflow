@@ -172,6 +172,16 @@ class Store:
             db.execute("INSERT INTO bindings VALUES(?,?,?,?) ON CONFLICT(project_id,media_id) DO UPDATE SET path=excluded.path,signature_json=excluded.signature_json",
                        (project_id, asset["media_id"], asset["local_path"], encode(signature)))
 
+    def asset_metadata(self, project_id, media_id):
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT metadata_json FROM assets WHERE project_id=? AND media_id=?",
+                (project_id, media_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(media_id)
+        return json.loads(row["metadata_json"])
+
     def binding(self, project_id, media_id):
         with self.connect() as db:
             row = db.execute("SELECT path FROM bindings WHERE project_id=? AND media_id=?", (project_id, media_id)).fetchone()
