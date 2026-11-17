@@ -58,30 +58,63 @@
     if (clip.blocked_reason || start === null || duration === null || duration <= 0 || rate <= 0) return null;
     return { start, end: start + duration * rate };
   }
+  function audioChannels(clip) {
+    const streams = Array.isArray(clip.audio_streams) ? clip.audio_streams : [];
+    if (!streams.length) return [{ stream: 0, channel: null, label: "音频概览 · 重扫识别声道" }];
+    const entries = [];
+    for (const stream of streams.slice(0, 32)) {
+      const index = number(stream.index), channels = number(stream.channels);
+      if (index === null || !Number.isInteger(index) || index < 0 ||
+          index > 31 || channels === null || !Number.isInteger(channels) ||
+          channels < 1 || channels > 32) continue;
+      for (let channel = 0; channel < channels; channel++) {
+        entries.push({ stream: index, channel,
+          label: streams.length > 1
+            ? "音流 " + (index + 1) + " · Ch" + (channel + 1)
+            : "Ch" + (channel + 1) });
+      }
+    }
+    return entries.length ? entries : [{ stream: 0, channel: null, label: "音频信息待核实" }];
+  }
   function tracksFor(clips) {
     const found = new Map();
+    const include = (key, name, kind, clip, stream = 0, channel = null) => {
+      if (!found.has(key)) found.set(key, { name, recorder: kind === "audio",
+        kind, clips: [], items: [], order: key });
+      const track = found.get(key);
+      track.items.push({ clip, stream, channel, kind, row: 0 });
+    };
     for (const clip of clips) {
       const recorder = clip.kind === "recorder";
-      const name = clip.camera || (recorder ? "独立录音" : "未分类机位");
-      const key = (recorder ? "rec:" : "cam:") + name;
-      if (!found.has(key)) found.set(key, { name, recorder, clips: [] });
-      found.get(key).clips.push(clip);
+      const name = clip.camera || (recorder ? "录音机" : "未分类机位");
+      const prefix = (recorder ? "z:" : "a:") + name + ":";
+      if (clip.has_video) include(prefix + "0", name, "video", clip);
+      if (clip.has_audio) {
+        for (const item of audioChannels(clip)) {
+          const postfix = String(item.stream).padStart(2, "0") +
+            "-" + String(item.channel ?? -1).padStart(2, "0");
+          include(prefix + "1:" + postfix, name + " · " + item.label,
+            "audio", clip, item.stream, item.channel);
+        }
+      }
     }
-    const tracks = [...found.values()];
-    tracks.sort((a, b) => Number(a.recorder) - Number(b.recorder) || a.name.localeCompare(b.name, "zh-CN"));
+    const tracks = [...found.values()].sort((a, b) => a.order.localeCompare(b.order, "zh-CN"));
     for (const track of tracks) {
       const ends = [];
-      for (const clip of [...track.clips].sort((a, b) =>
-        (number(a.offset_seconds) ?? Infinity) - (number(b.offset_seconds) ?? Infinity))) {
-        clip._trackRow = 0;
-        const extent = positionExtent(clip);
-        if (!extent) continue;
+      const missing = [];
+      for (const item of [...track.items].sort((a, b) =>
+        (positionExtent(a.clip)?.start ?? Infinity) -
+        (positionExtent(b.clip)?.start ?? Infinity))) {
+        const extent = positionExtent(item.clip);
+        if (!extent) { missing.push(item); continue; }
         let row = ends.findIndex((end) => end <= extent.start + 0.0001);
         if (row === -1) row = ends.length;
         ends[row] = extent.end;
-        clip._trackRow = row;
+        item.row = row;
       }
-      track.rows = Math.max(1, ends.length);
+      let nextRow = ends.length;
+      for (const item of missing) item.row = nextRow++;
+      track.rows = Math.max(1, nextRow);
       track.height = track.rows * 46 + 8;
     }
     return tracks;
@@ -197,9 +230,9 @@
     for (const track of tracks) {
       const label = pick("div", "track-heading" + (track.recorder ? " is-recorder" : ""));
       label.style.height = track.height + "px";
-      label.append(pick("span", "track-kind", track.recorder ? "REC" : "CAM"));
+      label.append(pick("span", "track-kind", track.kind === "video" ? "CAM" : "AUD"));
       label.append(pick("strong", "track-name", track.name));
-      label.append(pick("small", "track-count", String(track.clips.length)));
+      label.append(pick("small", "track-count", String(track.items.length)));
       headings.append(label);
       const lane = pick("div", "track-lane" + (track.recorder ? " is-recorder" : ""));
       lane.style.height = track.height + "px";
@@ -207,7 +240,8 @@
       lane.addEventListener("pointerdown", (event) => {
         if (event.target === lane) seekAt(event);
       });
-      for (const clip of track.clips) {
+      for (const item of track.items) {
+        const clip = item.clip;
         const offset = number(clip.offset_seconds);
         const duration = number(clip.duration);
         const rate = number(clip.rate) ?? 1;
@@ -219,7 +253,7 @@
             part.dataset.clipId = String(clip.id);
             part.style.left = ratio(piece.start) * 100 + "%";
             part.style.width = Math.max(0.001, (piece.end - piece.start) / span() * 100) + "%";
-            part.style.top = (4 + (clip._trackRow || 0) * 46) + "px";
+            part.style.top = (4 + item.row * 46) + "px";
             part.title = "候选分段映射：源 " + unit(piece.sourceStart, true) + " → " +
               unit(piece.sourceEnd, true) + "，公共时间 " + unit(piece.start, true) +
               " → " + unit(piece.end, true) + "；尚未通过核对";
@@ -232,12 +266,13 @@
           const missing = pick("button", "track-unmatched" + (clip.blocked_reason ? " is-blocked" : ""), clip.name || "未定位素材");
           missing.type = "button";
           missing.title = clip.blocked_reason ? "映射存在无法表达的局部变化，不展示虚假的连续同步位置" : "尚无同步位置，选择后人工处理";
+          missing.style.top = (7 + item.row * 46) + "px";
           missing.addEventListener("click", () => model.onSelect?.(String(clip.id)));
           lane.append(missing);
           continue;
         }
         const bar = pick("div", "track-clip" +
-          (track.recorder ? " is-audio" : " is-video") +
+          (item.kind === "audio" ? " is-audio" : " is-video") +
           (clip.status === "approved" ? " is-approved" : "") +
           (clip.status === "excluded" ? " is-excluded" : "") +
           (clip.blocked_reason ? " is-blocked" : ""));
@@ -247,12 +282,13 @@
         bar.dataset.clipId = String(clip.id);
         bar.style.left = ratio(offset) * 100 + "%";
         bar.style.width = Math.max(0.001, duration * rate / span() * 100) + "%";
-        bar.style.top = (4 + (clip._trackRow || 0) * 46) + "px";
+        bar.style.top = (4 + item.row * 46) + "px";
         bar.title = (clip.name || "素材") + " · " + unit(offset, true) + " · " + (clip.status || "proposed");
-        if (clip.has_audio && clip.media_id && model.projectId) {
+        if (item.kind === "audio" && clip.media_id && model.projectId) {
           const image = pick("img", "track-waveform");
           image.src = "/api/projects/" + encodeURIComponent(model.projectId) +
-            "/waveform/" + encodeURIComponent(clip.media_id);
+            "/waveform/" + encodeURIComponent(clip.media_id) +
+            "?stream=" + item.stream + (item.channel === null ? "" : "&channel=" + item.channel);
           image.loading = "lazy";
           image.alt = "";
           image.draggable = false;
