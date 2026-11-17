@@ -40,20 +40,34 @@ def _stop_tree(process: subprocess.Popen, windows_job=None) -> None:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # macOS can deny group signalling while the leader is exiting.
+            # Still terminate the leader; cleanup must never mask the actual
+            # timeout/cancellation with a transient process-group probe error.
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
         # Waiting for the leader alone is insufficient: its children can ignore
         # SIGTERM and keep an output pipe open after the leader exits.
         until = time.monotonic() + 0.5
         while time.monotonic() < until:
-            process.poll()  # Reap the leader promptly if it has already exited.
+            process.poll()
             try:
                 os.killpg(process.pid, 0)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
+                # EPERM does not prove a group was reaped. Follow with a direct
+                # SIGKILL attempt rather than abandoning cleanup.
                 break
             time.sleep(0.025)
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            if process.poll() is None:
+                process.kill()
     try:
         process.wait(timeout=3)
     except subprocess.TimeoutExpired:
