@@ -828,6 +828,19 @@
       item.card.classList.toggle("is-selected", String(item.clip.id) === String(id));
     window.FrameflowTimeline?.selectClip(String(id));
   }
+  function blockedExtent(clip) {
+    if (clip.blocked_reason !== "NONLINEAR_MAPPING" || !Array.isArray(clip.mapping) ||
+        clip.mapping.length < 2) return null;
+    const values = clip.mapping.map(point => {
+      const timescale = numeric(point?.island?.timescale);
+      const value = numeric(point?.island?.value);
+      return timescale > 0 && value !== null ? value / timescale : null;
+    });
+    if (values.some(v => v === null || !Number.isFinite(v) || Math.abs(v) > 7 * 86400))
+      return null;
+    if (values.some((v, i) => i > 0 && v <= values[i - 1])) return null;
+    return { start: values[0], end: values[values.length - 1] };
+  }
   function renderGroup() {
     pausePlayback();
     state.players.clear();
@@ -835,9 +848,16 @@
     $("inspector-body").replaceChildren();
     const clips = groupClips();
     const mapped = clips.filter((clip) => hasMapping(clip) && clip.status !== "excluded");
-    state.start = mapped.length ? Math.min(...mapped.map(clip => Number(clip.offset_seconds))) : 0;
-    state.end = mapped.length ? Math.max(...mapped.map(clip =>
-      Number(clip.offset_seconds) + Number(clip.duration || 0) * numeric(clip.rate, 1))) : 1;
+    const extents = mapped.map(clip => ({
+      start: Number(clip.offset_seconds),
+      end: Number(clip.offset_seconds) + Number(clip.duration || 0) * numeric(clip.rate, 1),
+    }));
+    for (const clip of clips) {
+      const extent = blockedExtent(clip);
+      if (extent) extents.push(extent);
+    }
+    state.start = extents.length ? Math.min(...extents.map(e => e.start)) : 0;
+    state.end = extents.length ? Math.max(...extents.map(e => e.end)) : 1;
     if (!(state.end > state.start)) state.end = state.start + 1;
     state.position = state.start;
     $("timeline-seek").min = String(state.start);
@@ -1046,14 +1066,37 @@
             : JSON.stringify(clip.reason),
         ),
       );
-    if (clip.blocked_reason)
-      info.append(
-        element(
-          "p",
-          "clip-reason",
-          `无法自动交付：${clip.blocked_reason}。请单独核对，当前可排除。`,
-        ),
-      );
+    if (clip.blocked_reason) {
+      info.append(element("p", "clip-reason",
+        clip.blocked_reason === "NONLINEAR_MAPPING"
+          ? "分段时间映射未核验，当前不能联动播放或交付。"
+          : "当前映射不可用于联动播放或交付。"));
+      if (clip.blocked_reason === "NONLINEAR_MAPPING" && Array.isArray(clip.mapping) &&
+          clip.mapping.length > 1) {
+        const points = clip.mapping.map(point => {
+          const sx = numeric(point?.source?.value), st = numeric(point?.source?.timescale);
+          const iy = numeric(point?.island?.value), it = numeric(point?.island?.timescale);
+          return (st > 0 && it > 0 && sx !== null && iy !== null)
+            ? { source: sx / st, island: iy / it } : null;
+        });
+        if (points.every(v => v && Number.isFinite(v.source) && Number.isFinite(v.island))) {
+          const details = element("details", "mapping-diagnostic");
+          details.append(element("summary", "", "分段映射锚点 · " + points.length));
+          const list = element("ol", "mapping-points");
+          for (let i = 0; i < points.length - 1; i++) {
+            const current = points[i], next = points[i + 1];
+            const slope = (next.island - current.island) / (next.source - current.source);
+            const row = element("li", "", "段 " + (i + 1) + " · 源 " +
+              timecode(current.source) + " → " + timecode(next.source) +
+              " · 公共 " + timecode(current.island) + " → " + timecode(next.island) +
+              " · " + (Number.isFinite(slope) ? ((slope - 1) * 1000000).toFixed(1) + "ppm" : "速率未知"));
+            list.append(row);
+          }
+          details.append(list);
+          info.append(details);
+        }
+      }
+    }
     if (clip.status === "proposed" && clip.review_reason)
       info.append(element("p", "clip-reason", `修正依据：${clip.review_reason} · 仍待播放核对`));
     const form = element("form", "clip-form");
