@@ -492,7 +492,7 @@
     const percent = measurable
       ? Math.max(0, Math.min(100, (completed / total) * 100))
       : 0;
-    $("progress-fill").style.width = `${percent}%`;
+    $("progress-fill").style.transform = `scaleX(${percent / 100})`;
     const progress = $("progress-track");
     if (measurable) {
       progress.setAttribute("aria-valuemin", "0");
