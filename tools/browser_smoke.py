@@ -195,6 +195,39 @@ def run_gate(artifacts: Path, timeout: float):
                 try:
                     checkpoint("open-local-ui")
                     page.goto(f"{origin}/#token={token}", wait_until="networkidle")
+                    checkpoint("verify-piecewise-preview-math")
+                    piecewise = page.evaluate("""() => {
+                        const f = window.FrameflowMapping;
+                        const good = {
+                            blocked_reason: "NONLINEAR_MAPPING", duration: 10, offset_seconds: null,
+                            mapping: [
+                                {source: {value: 0, timescale: 1}, island: {value: 100, timescale: 1}},
+                                {source: {value: 5, timescale: 1}, island: {value: 105, timescale: 1}},
+                                {source: {value: 10, timescale: 1}, island: {value: 2753, timescale: 25}}
+                            ]
+                        };
+                        const invalid = {
+                            ...good, mapping: [
+                                good.mapping[0], good.mapping[2], good.mapping[1]
+                            ]
+                        };
+                        return {
+                            available: Boolean(f),
+                            accepted: f?.isPreviewable(good),
+                            source: f?.sourceAt(good, 107.56),
+                            timeline: f?.timelineAt(good, 7.5),
+                            rate: f?.rateAt(good, 7.5),
+                            rejected: f?.isPreviewable(invalid) === false,
+                            blocked: good.blocked_reason === "NONLINEAR_MAPPING",
+                        };
+                    }""")
+                    require(piecewise["available"] and piecewise["accepted"] and piecewise["rejected"],
+                            "Piecewise preview accepted invalid anchors or rejected valid independent timing evidence.")
+                    require(abs(piecewise["source"] - 7.5) < 1e-6 and
+                            abs(piecewise["timeline"] - 107.56) < 1e-6 and
+                            abs(piecewise["rate"] - 1.024) < 1e-6,
+                            "Piecewise preview mapping disagrees with source/island anchor interpolation.")
+                    require(piecewise["blocked"], "Preview must never clear the nonlinear delivery block.")
                     checkpoint("check-tool-readiness")
                     page.wait_for_function("document.querySelector('#system-status').textContent.includes('已就绪')")
                     require("#token" not in page.url, "The bootstrap token remained in the address bar.")
