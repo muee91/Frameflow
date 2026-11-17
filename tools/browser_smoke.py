@@ -231,7 +231,10 @@ def run_gate(artifacts: Path, timeout: float):
                     require(all(clip.get("offset_seconds") is not None and not clip.get("blocked_reason") for clip in clips),
                             "The fixture does not have playable mappings.")
                     require(page.locator(".clip-card").count() == len(clips), "The review UI omitted a clip.")
-                    require(page.locator(".track-clip").count() == len(clips), "The multi-track timeline omitted media segments.")
+                    track_ids = page.locator(".track-clip").evaluate_all(
+                        "items => [...new Set(items.map(item => item.dataset.clipId))]")
+                    require(len(track_ids) == len(clips),
+                            "Each synchronized asset must appear in a timeline track.")
                     require(page.locator("#inspector-body .clip-form").count() == 1, "The selected clip inspector did not open.")
                     before_width = page.locator("#timeline-content").evaluate("node => node.getBoundingClientRect().width")
                     page.locator("#zoom-in").click()
@@ -260,6 +263,15 @@ def run_gate(artifacts: Path, timeout: float):
                         const media = card.querySelector('video, audio');
                         return !media.seeking && Math.abs(media.currentTime - expected[card.querySelector('h3').textContent]) < 0.12;
                     })""", arg=expected, timeout=15_000)
+                    checkpoint("keyboard-frame-step")
+                    page.locator("#timeline-viewport").focus()
+                    at = float(page.locator("#timeline-seek").input_value())
+                    page.keyboard.press("ArrowRight")
+                    stepped = float(page.locator("#timeline-seek").input_value())
+                    require(0.01 < stepped - at < 0.06, "Keyboard frame step must use actual project frame rate.")
+                    page.keyboard.press("ArrowLeft")
+                    require(abs(float(page.locator("#timeline-seek").input_value()) - at) < 0.002,
+                            "Reverse frame step did not restore the checkpoint.")
                     checkpoint("play-common-timeline")
                     before = page.locator(".clip-card video").evaluate_all("items => items.map(item => item.currentTime)")
                     page.locator("#toggle-play").click()
@@ -319,6 +331,19 @@ def run_gate(artifacts: Path, timeout: float):
                         page.locator("#toggle-play").click()
                         if trial == 0:
                             capture(page, artifacts, "04-correction-pending.png")
+                            checkpoint("undo-latest-correction")
+                            with page.expect_response(lambda response: response.url == f"{origin}/api/projects/{project_id}/review/undo"
+                                                      and response.request.method == "POST") as undone_request:
+                                page.locator("#inspector-body").get_by_role(
+                                    "button", name="撤销最近一次修正", exact=True).click()
+                            require(undone_request.value.status == 200, "Revision-aware undo failed.")
+                            undone = undone_request.value.json()
+                            restored = next(c for c in undone["clips"] if c["id"] == correction_clip["id"])
+                            require(abs(restored["offset_seconds"] - original_offset) < 1e-9 and
+                                    restored["status"] == "proposed",
+                                    "Undo did not restore the proposal without auto-approving.")
+                            require(page.locator("#export-fcpxml").is_disabled(),
+                                    "Undo reopened export without listening again.")
                     for index, clip in enumerate(clips):
                         checkpoint(f"review-clip-{index + 1}")
                         page.locator("#source-list .source-item").filter(has_text=clip["name"]).click()
