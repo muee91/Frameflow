@@ -125,6 +125,35 @@ class APITests(unittest.TestCase):
         self.client.cookies.clear()
         self.assertEqual(self.client.get(url).status_code, 401)
 
+    def test_waveform_selects_real_distinct_audio_streams_and_channels(self):
+        if not shutil.which("ffmpeg"):
+            self.skipTest("FFmpeg is required for real multi-stream peak test")
+        import subprocess
+        project, _ = self.publish_result()
+        path = self.media / "two-mono.mov"
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "sine=frequency=320:sample_rate=48000:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=990:sample_rate=48000:duration=2",
+            "-map", "0:a:0", "-map", "1:a:0", "-c:a", "pcm_s16le", str(path),
+        ], check=True, timeout=30)
+        identity = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        self.app.state.manager.store.save_asset(project["id"], {
+            "id": identity, "media_id": identity, "name": path.name,
+            "has_audio": True, "has_video": False, "audio_channels": 2,
+            "audio_streams": [{"index": 0, "channels": 1}, {"index": 1, "channels": 1}],
+            "local_path": str(path),
+        })
+        url = f"/api/projects/{project['id']}/waveform/{quote(identity, safe='')}"
+        for stream in (0, 1):
+            with self.subTest(stream=stream):
+                response = self.client.get(url + f"?stream={stream}&channel=0")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.content.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(self.client.get(url + "?stream=1&channel=1").status_code, 422)
+        self.assertEqual(self.client.get(url + "?stream=2&channel=0").status_code, 422)
+        self.assertEqual(self.client.get(url + "?stream=-1").status_code, 422)
+
     def test_undo_review_is_authenticated_and_preserves_pending_gate(self):
         project, result = self.publish_result()
         cid = result["clips"][0]["id"]
