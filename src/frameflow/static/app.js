@@ -922,8 +922,7 @@
       listen.type = "button";
       listen.addEventListener("click", () => {
         $("audio-select").value = String(clip.id);
-        for (const item of state.players.values())
-          item.media.muted = String(item.clip.id) !== $("audio-select").value;
+        changeAudioSource();
         updateTransport();
       });
       inspector.prepend(listen);
@@ -992,6 +991,7 @@
       if (clip.has_video) $("clip-grid").append(card);
       else $("audio-pool").append(card);
     }
+    updateMonitorLayout();
     if (!clips.length) $("clip-grid").append(element("p", "no-clips", "当前同步组没有素材。"));
     renderSourceRail(clips);
     const first = clips.find(clip => clip.has_video) || clips[0];
@@ -1032,6 +1032,11 @@
     });
     updateTransport();
   }
+  function updateMonitorLayout() {
+    const videos = [...$("clip-grid").querySelectorAll("video")];
+    $("clip-grid").classList.toggle("is-portrait-grid", videos.length > 0 &&
+      videos.every(video => video.videoWidth > 0 && video.videoHeight > video.videoWidth));
+  }
   function createClipCard(clip) {
     const mapped = isPreviewable(clip);
     const linked = mapped && clip.status !== "excluded";
@@ -1059,7 +1064,8 @@
       `media-wrap${clip.has_video ? "" : " audio-only"}`,
     );
     const media = element(clip.has_video ? "video" : "audio");
-    media.preload = clip.has_video ? "metadata" : "auto";
+    media.preload = clip.has_video ? "metadata" :
+      String(clip.id) === $("audio-select").value ? "auto" : "none";
     media.controls = !linked;
     media.playsInline = true;
     media.muted = true;
@@ -1107,6 +1113,8 @@
       }
     });
     media.addEventListener("loadedmetadata", () => {
+      if (state.players.get(String(clip.id)) !== player) return;
+      if (clip.has_video) updateMonitorLayout();
       if (mapped) syncPlayer(player, false);
     });
     media.addEventListener("waiting", () => {
@@ -1114,6 +1122,7 @@
         state.players.get(String(clip.id)) === player &&
         state.playing &&
         player.active &&
+        isPlaybackSource(clip) &&
         (media.readyState < 3 || media.seeking)
       )
         beginBuffering();
@@ -1180,7 +1189,7 @@
     if (clip.blocked_reason) {
       info.append(element("p", "clip-reason",
         clip.blocked_reason === "NONLINEAR_MAPPING"
-          ? "分段时间映射未核验，当前不能联动播放或交付。"
+          ? "分段时间映射未核验，可作候选试听，仍不能审批或交付。"
           : "当前映射不可用于联动播放或交付。"));
       if (clip.blocked_reason === "NONLINEAR_MAPPING" && Array.isArray(clip.mapping) &&
           clip.mapping.length > 1) {
@@ -1423,9 +1432,11 @@
       element(
         "p",
         "clip-annotation",
-        mapped
+        hasMapping(clip)
           ? `起点 ${numeric(clip.offset_seconds).toFixed(3)} s · 修改后先应用并播放，再确认位置`
-          : "未匹配素材不会自动填入零偏移。",
+          : piecewisePoints(clip)
+            ? "分段候选按锚点试听，不具有单一起点；仍需逐段核对。"
+            : "未匹配素材不会自动填入零偏移。",
       ),
     );
     card.append(top, wrap, info);
@@ -1438,9 +1449,17 @@
   function sourcePosition(player, timeline = state.position) {
     return sourceAt(player.clip, timeline);
   }
+  function isPlaybackSource(clip) {
+    return clip.has_video || String(clip.id) === $("audio-select").value;
+  }
+  function changeAudioSource() {
+    if (state.playing) beginBuffering();
+    else updateTransport();
+  }
   function activePlayers() {
     return [...state.players.values()].filter((player) => {
-      if (!isPreviewable(player.clip) || player.clip.status === "excluded")
+      if (!isPreviewable(player.clip) || player.clip.status === "excluded" ||
+          !isPlaybackSource(player.clip))
         return false;
       const source = sourcePosition(player);
       return source >= 0 && source < Number(player.clip.duration || 0);
@@ -1483,6 +1502,21 @@
         ? "这段素材尚未开始"
         : "这段素材已结束";
     media.muted = String(clip.id) !== $("audio-select").value;
+    if (!clip.has_video) {
+      if (!isPlaybackSource(clip)) {
+        player.active = false;
+        media.pause();
+        if (media.preload !== "none") {
+          media.preload = "none";
+          media.load();
+        }
+        return;
+      }
+      if (media.preload !== "auto") {
+        media.preload = "auto";
+        if (media.readyState === 0) media.load();
+      }
+    }
     const playbackRate = 1 / rateAt(clip, Math.max(0, source));
     if (playbackRate < 0.0625 || playbackRate > 16) {
       player.failed = true;
@@ -1606,7 +1640,7 @@
     state.clockTime = performance.now();
     for (const player of state.players.values()) {
       player.media.pause();
-      if (isPreviewable(player.clip) && player.clip.status !== "excluded")
+      if (player.clip.has_video && isPreviewable(player.clip) && player.clip.status !== "excluded")
         player.media.preload = "auto";
     }
     updateTransport();
@@ -1850,10 +1884,7 @@
       state.selectedGroup = $("group-select").value;
       renderGroup();
     });
-    $("audio-select").addEventListener("change", () => {
-      for (const player of state.players.values())
-        player.media.muted = String(player.clip.id) !== $("audio-select").value;
-    });
+    $("audio-select").addEventListener("change", changeAudioSource);
     $("toggle-play").addEventListener("click", togglePlay);
     $("add-sync-marker").addEventListener("click", addSyncMarker);
     $("timeline-seek").addEventListener("input", (event) => {

@@ -9,6 +9,10 @@ There are no API, worker, media or browser mocks. All media is generated in a
 TemporaryDirectory. Screenshots and the small validation summary go only to the
 explicit artifact directory. Passing this gate does not verify a camera shoot or
 any target NLE import. Do not run this script on a restricted preview surface.
+
+After the actual Align/export workflow, an explicit stored-result fixture
+checks rendering and review gates for nonlinear media. It does not verify
+Align's nonlinear estimates or real piecewise synchronization accuracy.
 """
 
 from __future__ import annotations
@@ -148,6 +152,7 @@ def failure_diagnostic(error, stage, page=None):
                 })),
                 media: [...document.querySelectorAll('.clip-card video, .clip-card audio')].map((media, index) => ({
                     index, kind: media.tagName, currentTime: media.currentTime,
+                    videoWidth: media.videoWidth || null, videoHeight: media.videoHeight || null,
                     duration: Number.isFinite(media.duration) ? media.duration : null,
                     readyState: media.readyState, networkState: media.networkState,
                     paused: media.paused, seeking: media.seeking, ended: media.ended,
@@ -423,6 +428,144 @@ def run_gate(artifacts: Path, timeout: float):
                     asset_count = len(document.findall("./resources/asset"))
                     require(asset_count >= 3, "The candidate export omitted a source media asset.")
                     capture(page, artifacts, "04-export-desktop.png")
+                    checkpoint("open-piecewise-candidate-result")
+                    from array import array
+                    from copy import deepcopy
+                    import subprocess
+                    import wave
+                    from frameflow.engine import _clip
+                    from frameflow.jobs import JobContext
+                    from frameflow.media import probe_and_hash
+                    from frameflow.store import Store
+
+                    fixture = deepcopy(get_json(client, f"/api/projects/{project_id}/result"))
+                    for clip in fixture["clips"]:
+                        clip["status"] = "proposed"
+                        clip.pop("review_reason", None)
+                    segmented = next(clip for clip in fixture["clips"] if not clip["has_video"])
+                    offset, duration = segmented["offset_seconds"], segmented["duration"]
+                    def media_time(seconds):
+                        return {"value": round(seconds * 1_000_000), "timescale": 1_000_000}
+                    segmented.update(offset_seconds=None, blocked_reason="NONLINEAR_MAPPING", mapping=[
+                        {"source": media_time(0), "island": media_time(offset)},
+                        {"source": media_time(duration / 2), "island": media_time(offset + duration / 2 + 0.1)},
+                        {"source": media_time(duration), "island": media_time(offset + duration)},
+                    ])
+                    fixture["engine"] = {"name": "explicit nonlinear UI fixture", "version": "test"}
+                    store = Store(root / "workspace" / "frameflow.sqlite3")
+                    fixture_job = store.create_job(project_id)
+                    require(store.start_job(fixture_job["id"]), "Could not publish the declared UI fixture.")
+                    # A second real WAV in the declared UI fixture exercises
+                    # lazy monitoring; it is not another Align sync result.
+                    first_recording = store.binding(project_id, segmented["media_id"])
+                    second_recording = Path(first_recording).with_name("second-monitor.wav")
+                    with wave.open(str(first_recording), "rb") as source:
+                        require(source.getsampwidth() == 2, "The owned recorder fixture must be PCM16.")
+                        samples = array("h", source.readframes(source.getnframes()))
+                        with wave.open(str(second_recording), "wb") as destination:
+                            destination.setparams(source.getparams())
+                            destination.writeframes(array("h", (sample // 2 for sample in samples)).tobytes())
+                    asset = probe_and_hash({"path": second_recording, "camera": "Second recorder", "kind": "recorder"},
+                                           JobContext(store, fixture_job["id"]))
+                    store.save_asset(project_id, asset)
+                    extra = _clip(asset)
+                    extra.update(status="proposed", group_id=segmented["group_id"], offset_seconds=offset,
+                                 mapping=[{"source": media_time(0), "island": media_time(offset)},
+                                          {"source": media_time(extra["duration"]),
+                                           "island": media_time(offset + extra["duration"])}])
+                    fixture["clips"].append(extra)
+                    first_camera = next(clip for clip in fixture["clips"] if clip["has_video"])
+                    camera_source = Path(store.binding(project_id, first_camera["media_id"]))
+                    portraits = []
+                    for angle in range(3):
+                        path = camera_source.with_name(f"portrait-{angle + 1}.mp4")
+                        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-n", "-display_rotation:v:0", "90", "-i", str(camera_source),
+                                        "-map", "0", "-c", "copy",
+                                        "-metadata", f"comment=owned-portrait-ui-fixture-{angle}", str(path)],
+                                       check=True, capture_output=True, timeout=30)
+                        asset = probe_and_hash({"path": path, "camera": f"Portrait {angle + 1}", "kind": "camera"},
+                                               JobContext(store, fixture_job["id"]))
+                        store.save_asset(project_id, asset)
+                        portrait = _clip(asset)
+                        portrait.update(status="proposed", group_id=segmented["group_id"], offset_seconds=offset,
+                                        mapping=[{"source": media_time(0), "island": media_time(offset)},
+                                                 {"source": media_time(portrait["duration"]),
+                                                  "island": media_time(offset + portrait["duration"])}])
+                        portraits.append(portrait)
+                    fixture["clips"] = portraits + [clip for clip in fixture["clips"] if not clip["has_video"]]
+                    store.finish(fixture_job["id"], "needs_review", result=fixture)
+                    page.reload()
+                    page.locator("#project-select").select_option(project_id)
+                    page.locator("#review-panel").wait_for(state="visible", timeout=15_000)
+                    page.locator("#clip-grid.is-portrait-grid").wait_for(state="visible", timeout=15_000)
+                    require(page.locator(".clip-card").count() == len(fixture["clips"]), "A nonlinear clip prevented the project from rendering.")
+                    for viewport, label in [({"width": 1440, "height": 1050}, "desktop"),
+                                            ({"width": 390, "height": 844}, "mobile")]:
+                        page.set_viewport_size(viewport)
+                        geometry = page.locator("#clip-grid").evaluate("""grid => {
+                            const bounds = grid.getBoundingClientRect();
+                            const videos = [...grid.querySelectorAll('video')];
+                            return {count: videos.length, contained: grid.scrollHeight <= grid.clientHeight + 1 &&
+                                videos.every(video => {const r = video.getBoundingClientRect(); return (
+                                    video.videoHeight > video.videoWidth && getComputedStyle(video).objectFit === 'contain' &&
+                                    r.top >= bounds.top - 1 && r.bottom <= bounds.bottom + 1);}),
+                                tops: videos.map(v => v.getBoundingClientRect().top)};
+                        }""")
+                        require(geometry["count"] == 3 and geometry["contained"], "A rotated portrait preview was clipped by its monitor grid.")
+                        if label == "desktop":
+                            require(max(geometry["tops"]) - min(geometry["tops"]) < 1, "Wide-screen portrait cameras did not share a row.")
+                        capture(page, artifacts, "05-portrait-" + label + ".png")
+                    page.set_viewport_size({"width": 1440, "height": 1050})
+                    page.locator("#source-list .source-item").filter(has_text=segmented["name"]).click()
+                    inspector = page.locator("#inspector-body")
+                    require(inspector.get_by_label(f"{segmented['name']} 同步起点秒数", exact=True).input_value() == "",
+                            "A nonlinear mapping was displayed as a fabricated single zero offset.")
+                    require(inspector.get_by_role("button", name="确认位置", exact=True).is_disabled() and
+                            inspector.get_by_role("button", name="应用修正（待核对）", exact=True).is_disabled(),
+                            "Candidate preview unlocked nonlinear approval or an affine correction.")
+                    target = offset + duration / 4 + 0.05
+                    page.locator("#timeline-seek").evaluate("""(range, target) => {
+                        range.value = String(target); range.dispatchEvent(new Event('input', {bubbles: true}));
+                    }""", target)
+                    page.wait_for_function("""(expected) => {
+                        const media = document.querySelector('.clip-card audio');
+                        return media && media.readyState >= 2 && !media.seeking && Math.abs(media.currentTime - expected) < 0.12;
+                    }""", arg=duration / 4, timeout=15_000)
+                    page.locator("#toggle-play").click()
+                    page.wait_for_function("""(before) => {
+                        const media = document.querySelector('.clip-card audio');
+                        return media && !media.paused && media.currentTime > before + 0.4;
+                    }""", arg=duration / 4, timeout=15_000)
+                    checkpoint("switch-recorder-on-demand")
+                    require(page.get_by_label(extra["name"] + " 播放器", exact=True).evaluate(
+                        "media => media.paused && media.muted && media.currentTime < 0.01"),
+                        "An unmonitored recording decoded or followed the transport.")
+                    page.locator("#audio-select").select_option(extra["id"])
+                    page.wait_for_function("""(expected) => {
+                        const media = [...document.querySelectorAll('.clip-card audio')].find(m => m.getAttribute('aria-label') === expected.label);
+                        const timeline = Number(document.querySelector('#timeline-seek').value);
+                        return document.querySelector('#toggle-play').dataset.playbackState === 'playing' &&
+                            media && !media.paused && !media.muted && Math.abs(media.currentTime + expected.offset - timeline) < 0.2;
+                    }""", arg={"label": extra["name"] + " 播放器", "offset": offset}, timeout=15_000)
+                    require(page.get_by_label(segmented["name"] + " 播放器", exact=True).evaluate("media => media.paused && media.muted"),
+                            "Changing the monitoring source left the previous recorder playing.")
+                    camera = next(clip for clip in fixture["clips"] if clip["has_video"])
+                    page.locator("#source-list .source-item").filter(has_text=camera["name"]).click()
+                    page.locator("#inspector-body").get_by_role("button", name="监听此路", exact=True).click()
+                    page.wait_for_function("""() => document.querySelector('#toggle-play').dataset.playbackState === 'playing' &&
+                        [...document.querySelectorAll('.clip-card audio')].every(media => media.paused && media.muted) &&
+                        [...document.querySelectorAll('.clip-card video')].filter(media => !media.muted).length === 1""", timeout=15_000)
+                    page.locator("#toggle-play").click()
+                    require(page.locator("#export-fcpxml").is_disabled() and client.get(f"/api/projects/{project_id}/export").status_code == 409,
+                            "Nonlinear candidate playback unlocked export.")
+                    pending = get_json(client, f"/api/projects/{project_id}/result")
+                    response = client.post(f"/api/projects/{project_id}/review", json={
+                        "revision": pending["revision"], "clip_id": segmented["id"], "status": "approved",
+                        "reason": "Synthetic gate must reject this unverified nonlinear mapping."})
+                    require(response.status_code == 422 and
+                            get_json(client, f"/api/projects/{project_id}/result")["revision"] == pending["revision"],
+                            "The server allowed nonlinear approval or changed the revision on rejection.")
+                    capture(page, artifacts, "05-piecewise-candidate.png")
                     require(not javascript_errors, "The browser raised uncaught JavaScript errors.")
                     summary = {
                         "browser_workflow": "passed",
@@ -431,6 +574,9 @@ def run_gate(artifacts: Path, timeout: float):
                         "media": "FFmpeg-generated synthetic H264/AAC and independent WAV",
                         "clips_reviewed": len(clips), "export_assets": asset_count,
                         "playback": "two video clocks advanced after a mapped seek; recorder audio isolated",
+                        "piecewise_ui_contract": "passed; explicit stored-result fixture, not verified nonlinear sync accuracy",
+                        "monitoring_contract": "only the chosen recorder plays; live recorder switching and inspector camera monitoring passed",
+                        "portrait_layout_contract": "three rotated portrait cameras share a desktop row and remain uncropped on desktop/mobile",
                         "real_shoot_verified": False, "target_nle_import_verified": False,
                     }
                     (artifacts / "browser-validation.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
