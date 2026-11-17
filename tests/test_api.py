@@ -125,6 +125,31 @@ class APITests(unittest.TestCase):
         self.client.cookies.clear()
         self.assertEqual(self.client.get(url).status_code, 401)
 
+    def test_undo_review_is_authenticated_and_preserves_pending_gate(self):
+        project, result = self.publish_result()
+        cid = result["clips"][0]["id"]
+        base = f"/api/projects/{project['id']}"
+        revised = self.client.post(base + "/review", json={
+            "revision": result["revision"], "clip_id": cid, "status": "proposed",
+            "offset_seconds": 0.25, "reason": "录音中的拍板偏移校对。"})
+        self.assertEqual(revised.status_code, 200, revised.text)
+        changed = revised.json()
+        self.assertEqual(changed["undo_clip_id"], cid)
+        stale = self.client.post(base + "/review/undo", json={
+            "revision": result["revision"], "clip_id": cid})
+        self.assertEqual(stale.status_code, 409)
+        response = self.client.post(base + "/review/undo", json={
+            "revision": changed["revision"], "clip_id": cid})
+        self.assertEqual(response.status_code, 200, response.text)
+        undone = response.json()
+        self.assertEqual(undone["clips"][0]["offset_seconds"], 0)
+        self.assertEqual(undone["clips"][0]["status"], "proposed")
+        self.assertIsNone(undone["undo_clip_id"])
+        self.assertEqual(self.client.get(base + "/export").status_code, 409)
+        self.client.cookies.clear()
+        self.assertEqual(self.client.post(base + "/review/undo", json={
+            "revision": undone["revision"], "clip_id": cid}).status_code, 401)
+
     def test_changed_source_cannot_be_played_as_verified_asset(self):
         _, result = self.publish_result()
         with self.paths[0].open("ab") as output:
