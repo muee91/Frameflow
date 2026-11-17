@@ -792,6 +792,68 @@
       clip.group_id !== undefined
     );
   }
+  const piecewiseCache = new WeakMap();
+  function piecewisePoints(clip) {
+    if (piecewiseCache.has(clip)) return piecewiseCache.get(clip);
+    let result = null;
+    if (clip.blocked_reason === "NONLINEAR_MAPPING" &&
+        Array.isArray(clip.mapping) && clip.mapping.length >= 2 &&
+        clip.mapping.length <= 4096) {
+      const points = clip.mapping.map(point => {
+        const sx = numeric(point?.source?.value), st = numeric(point?.source?.timescale);
+        const iy = numeric(point?.island?.value), it = numeric(point?.island?.timescale);
+        return st > 0 && it > 0 && sx !== null && iy !== null ?
+          { source: sx / st, island: iy / it } : null;
+      });
+      if (points.every(p => p && Number.isFinite(p.source) && Number.isFinite(p.island) &&
+            Math.abs(p.island) <= 7 * 86400) &&
+          Math.abs(points[0].source) < 0.01 &&
+          Math.abs(points[points.length - 1].source - Number(clip.duration)) < 0.01 &&
+          points.slice(1).every((p, i) => {
+            const last = points[i];
+            const dx = p.source - last.source, dy = p.island - last.island;
+            return dx > 0 && dy > 0 && dy / dx >= 0.5 && dy / dx <= 2;
+          })) result = points;
+    }
+    piecewiseCache.set(clip, result);
+    return result;
+  }
+  function isPreviewable(clip) {
+    return hasMapping(clip) || piecewisePoints(clip) !== null;
+  }
+  function sourceAt(clip, timeline) {
+    const points = piecewisePoints(clip);
+    if (!points) return (timeline - Number(clip.offset_seconds)) / numeric(clip.rate, 1);
+    if (timeline < points[0].island) return -1;
+    if (timeline >= points[points.length - 1].island) return Number(clip.duration || 0);
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1], b = points[i];
+      if (timeline <= b.island)
+        return a.source + (timeline - a.island) * (b.source - a.source) / (b.island - a.island);
+    }
+    return Number(clip.duration || 0);
+  }
+  function timelineAt(clip, source) {
+    const points = piecewisePoints(clip);
+    if (!points) return Number(clip.offset_seconds) + source * numeric(clip.rate, 1);
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1], b = points[i];
+      if (source <= b.source)
+        return a.island + (source - a.source) * (b.island - a.island) / (b.source - a.source);
+    }
+    return points[points.length - 1].island;
+  }
+  function rateAt(clip, source) {
+    const points = piecewisePoints(clip);
+    if (!points) return numeric(clip.rate, 1);
+    for (let i = 1; i < points.length; i++) {
+      if (source <= points[i].source)
+        return (points[i].island - points[i - 1].island) /
+          (points[i].source - points[i - 1].source);
+    }
+    return (points[points.length - 1].island - points[points.length - 2].island) /
+      (points[points.length - 1].source - points[points.length - 2].source);
+  }
   function safeMediaUrl(value) {
     if (!value || typeof value !== "string") return null;
     try {
@@ -891,8 +953,8 @@
     state.inspectorPlayer = null;
     $("inspector-body").replaceChildren();
     const clips = groupClips();
-    const mapped = clips.filter((clip) => hasMapping(clip) && clip.status !== "excluded");
-    const extents = mapped.map(clip => ({
+    const mapped = clips.filter((clip) => isPreviewable(clip) && clip.status !== "excluded");
+    const extents = mapped.map(clip => blockedExtent(clip) || ({
       start: Number(clip.offset_seconds),
       end: Number(clip.offset_seconds) + Number(clip.duration || 0) * numeric(clip.rate, 1),
     }));
@@ -912,7 +974,9 @@
     $("timeline-duration").textContent = "/ " + timecode(state.end);
     $("toggle-play").disabled = !mapped.length;
     $("group-summary").textContent = clips.length + " 项 · " + (mapped.length ? timecode(state.end - state.start) : "尚无公共位置");
-    state.playbackHelp = mapped.length ? "" : "尚无公共同步位置，请选择素材人工定位。";
+    state.playbackHelp = mapped.some(clip => clip.blocked_reason === "NONLINEAR_MAPPING")
+      ? "分段候选仅供试听，仍需独立核对，禁止确认与导出。"
+      : mapped.length ? "" : "尚无公共同步位置，请选择素材人工定位。";
     $("playback-help").textContent = state.playbackHelp;
     const audioSelect = $("audio-select");
     audioSelect.replaceChildren(new Option("静音", ""));
@@ -969,7 +1033,7 @@
     updateTransport();
   }
   function createClipCard(clip) {
-    const mapped = hasMapping(clip);
+    const mapped = isPreviewable(clip);
     const linked = mapped && clip.status !== "excluded";
     const card = element("article", "clip-card");
     const top = element("div", "clip-top");
@@ -1015,7 +1079,8 @@
     const overlay = element(
       "span",
       "media-overlay",
-      mapped ? "等待共同播放" : "单独播放 · 未同步",
+      clip.blocked_reason === "NONLINEAR_MAPPING" ? "候选分段试听 · 待核验" :
+        mapped ? "等待共同播放" : "单独播放 · 未同步",
     );
     wrap.append(overlay);
     const playbackError = element(
@@ -1153,7 +1218,7 @@
     // Engine mappings may be more precise than a millisecond; the form must
     // preserve them instead of blocking approval with a native step mismatch.
     offset.step = "any";
-    offset.value = mapped ? String(numeric(clip.offset_seconds, 0)) : "";
+    offset.value = hasMapping(clip) ? String(numeric(clip.offset_seconds, 0)) : "";
     offset.placeholder = "填写人工位置";
     offset.setAttribute("aria-label", `${clip.name} 同步起点秒数`);
     offsetLabel.append(offset);
@@ -1371,14 +1436,11 @@
     return card;
   }
   function sourcePosition(player, timeline = state.position) {
-    return (
-      (timeline - Number(player.clip.offset_seconds)) /
-      numeric(player.clip.rate, 1)
-    );
+    return sourceAt(player.clip, timeline);
   }
   function activePlayers() {
     return [...state.players.values()].filter((player) => {
-      if (!hasMapping(player.clip) || player.clip.status === "excluded")
+      if (!isPreviewable(player.clip) || player.clip.status === "excluded")
         return false;
       const source = sourcePosition(player);
       return source >= 0 && source < Number(player.clip.duration || 0);
@@ -1398,8 +1460,7 @@
     ) {
       return Math.min(
         state.end,
-        Number(master.clip.offset_seconds) +
-          master.media.currentTime * numeric(master.clip.rate, 1),
+        timelineAt(master.clip, master.media.currentTime),
       );
     }
     return Math.min(
@@ -1409,7 +1470,7 @@
   }
   function syncPlayer(player, play) {
     const { clip, media } = player;
-    if (!hasMapping(clip) || clip.status === "excluded" || player.failed) {
+    if (!isPreviewable(clip) || clip.status === "excluded" || player.failed) {
       if (play) media.pause();
       return;
     }
@@ -1422,7 +1483,7 @@
         ? "这段素材尚未开始"
         : "这段素材已结束";
     media.muted = String(clip.id) !== $("audio-select").value;
-    const playbackRate = 1 / numeric(clip.rate, 1);
+    const playbackRate = 1 / rateAt(clip, Math.max(0, source));
     if (playbackRate < 0.0625 || playbackRate > 16) {
       player.failed = true;
       media.pause();
@@ -1545,7 +1606,7 @@
     state.clockTime = performance.now();
     for (const player of state.players.values()) {
       player.media.pause();
-      if (hasMapping(player.clip) && player.clip.status !== "excluded")
+      if (isPreviewable(player.clip) && player.clip.status !== "excluded")
         player.media.preload = "auto";
     }
     updateTransport();
@@ -1591,7 +1652,7 @@
   }
   function stepTimeline(direction, seconds = null) {
     if (!state.result || !state.reviewVisible) return;
-    const video = groupClips().find(clip => clip.has_video && hasMapping(clip) && positiveFrameRate(clip.fps));
+    const video = groupClips().find(clip => clip.has_video && isPreviewable(clip) && positiveFrameRate(clip.fps));
     const fps = video && positiveFrameRate(video.fps);
     if (seconds === null && !fps) {
       showNotice("当前同步组没有有效的项目帧率，不能逐帧移动。", "warning");
@@ -1634,7 +1695,7 @@
     }
     if (
       !groupClips().some(
-        (clip) => hasMapping(clip) && clip.status !== "excluded",
+        (clip) => isPreviewable(clip) && clip.status !== "excluded",
       )
     )
       return;
