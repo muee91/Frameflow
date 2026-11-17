@@ -11,7 +11,7 @@ from unittest.mock import patch
 import wave
 
 from frameflow.errors import TaskCancelled, TaskError
-from frameflow.media import probe_and_hash, scan_roots
+from frameflow.media import probe_and_hash, scan_roots, verify_identity
 
 
 class Context:
@@ -193,6 +193,48 @@ class MediaTests(unittest.TestCase):
                 with self.assertRaises(TaskError) as error:
                     probe_and_hash(item(path), context)
             self.assertEqual(error.exception.code, "SOURCE_CHANGED")
+
+    def test_identity_verification_is_complete_without_reprobing_and_progress_is_throttled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "large.wav"
+            content = b"x" * (5 * 1024 * 1024)
+            path.write_bytes(content)
+            expected = "sha256:" + hashlib.sha256(content).hexdigest()
+            context = Context()
+            with patch("frameflow.media.run_command", side_effect=AssertionError("verification must not rerun ffprobe")), \
+                    patch("frameflow.media.time.monotonic", return_value=10.0):
+                verify_identity(path, expected, context, message="交付前复核。")
+            progress = [event for event in context.events if event[0] == "verify"]
+            self.assertEqual([event[1] for event in progress], [0, len(content)])
+            self.assertTrue(all(event[2] == len(content) and event[3]["unit"] == "bytes" for event in progress))
+            self.assertTrue(all(event[3]["message"] == "交付前复核。" for event in progress))
+            with path.open("r+b") as output:
+                output.seek(len(content) // 2)
+                output.write(b"y")
+            with self.assertRaises(TaskError) as caught:
+                verify_identity(path, expected, Context())
+            self.assertEqual(caught.exception.code, "SOURCE_CHANGED")
+
+    def test_identity_verification_cancels_between_chunks_without_waiting_for_progress(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "large.wav"
+            content = b"x" * (5 * 1024 * 1024)
+            path.write_bytes(content)
+            expected = "sha256:" + hashlib.sha256(content).hexdigest()
+            context = Context()
+            context.heartbeat = lambda: setattr(context, "cancelled", True)
+            with patch("frameflow.media.time.monotonic", return_value=10.0), self.assertRaises(TaskCancelled):
+                verify_identity(path, expected, context)
+            self.assertEqual([event[1] for event in context.events if event[0] == "verify"], [0])
+
+    def test_identity_verification_never_accepts_placeholder_id(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "source.wav"
+            path.write_bytes(b"synthetic content")
+            for identity in ("sha256:a", "fixture-id", None):
+                with self.subTest(identity=identity), self.assertRaises(TaskError) as caught:
+                    verify_identity(path, identity, Context())
+                self.assertEqual(caught.exception.code, "INVALID_MEDIA_ID")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Real filesystem regressions, including the native Windows change timestamp."""
+"""Native metadata guards and full-content verification are distinct checks."""
 
 import json
 import os
@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from frameflow.errors import TaskError
 from frameflow.file_state import descriptor_signature, path_signature
-from frameflow.media import probe_and_hash
+from frameflow.media import probe_and_hash, verify_identity
 from frameflow.store import Store
 
 
@@ -68,19 +68,29 @@ class FileStateTests(unittest.TestCase):
                 self.assertEqual(descriptor_signature(source.fileno()), expected)
                 self.assertEqual(path_signature(self.path), expected)
 
-    def test_same_size_rewrite_with_restored_mtime_changes_signature(self):
+    def test_identity_recheck_rejects_rewrite_even_when_metadata_collides(self):
+        asset = self.asset()
         before = path_signature(self.path)
         self.replace_one_byte_preserving_mtime()
         after = path_signature(self.path)
         self.assertEqual(before["size"], after["size"])
         self.assertEqual(before["modified_ns"], after["modified_ns"])
-        self.assertNotEqual(before["changed_ns"], after["changed_ns"])
-        self.assertNotEqual(before, after)
+        # Windows CI demonstrated equal ChangeTime for this real quick write.
+        # Force the collision on every platform; no sleep or timestamp-order
+        # assumption may substitute for checking the expected content hash.
+        with patch("frameflow.media.path_signature", return_value=before), \
+                patch("frameflow.media.descriptor_signature", return_value=before):
+            with self.assertRaises(TaskError) as caught:
+                verify_identity(self.path, asset["media_id"], Context())
+        self.assertEqual(caught.exception.code, "SOURCE_CHANGED")
 
     def test_binding_cannot_pair_old_hash_with_changed_source_state(self):
         asset = self.asset()
         store, project_id = self.store_and_project()
-        self.replace_one_byte_preserving_mtime()
+        # This is specifically the inexpensive metadata handoff guard. A size
+        # change is deterministic even if two writes share a timestamp tick.
+        with self.path.open("ab") as output:
+            output.write(b" changed size")
         with self.assertRaises(TaskError) as caught:
             store.save_asset(project_id, asset)
         self.assertEqual(caught.exception.code, "SOURCE_CHANGED")

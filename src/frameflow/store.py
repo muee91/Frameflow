@@ -158,8 +158,10 @@ class Store:
             signature = path_signature(Path(asset["local_path"]))
         except OSError as exc:
             raise TaskError("MEDIA_UNREADABLE", "无法验证本机素材文件状态，请检查素材后重试。") from exc
-        # Probe supplies the state that enclosed its full-content hash. Never
-        # associate that old hash with a fresh signature after a source change.
+        # Probe supplies the metadata state enclosing its full-content hash.
+        # Refuse a known change rather than refresh the old identity's state.
+        # Equal metadata is not content proof: the runner performs full hash
+        # verification before publishing synchronization or delivery results.
         # Internal test/import callers without a probe snapshot still bind the
         # current state, but the production scanner always supplies this field.
         if asset.get("_source_signature") is not None and signature != asset["_source_signature"]:
@@ -178,6 +180,7 @@ class Store:
             return Path(row[0])
 
     def checked_binding(self, project_id, media_id):
+        """Fast local metadata guard; full identity checks belong to the worker."""
         with self.connect() as db:
             row = db.execute("SELECT path,signature_json FROM bindings WHERE project_id=? AND media_id=?", (project_id, media_id)).fetchone()
         if row is None:

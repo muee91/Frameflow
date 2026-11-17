@@ -8,7 +8,9 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
+import time
 
 from .errors import TaskError
 from .file_state import descriptor_signature, path_signature
@@ -18,6 +20,7 @@ from .process import run_command
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mxf", ".mts", ".m2ts", ".avi", ".mkv", ".m4v", ".webm", ".mpg", ".mpeg", ".3gp"})
 AUDIO_EXTENSIONS = frozenset({".wav", ".wave", ".bwf", ".aif", ".aiff", ".flac", ".m4a", ".mp3", ".aac", ".ogg"})
 _CHUNK_BYTES = 1024 * 1024
+_HASH_PROGRESS_SECONDS = 0.2
 
 
 def _regular_stat(path: Path) -> os.stat_result:
@@ -154,6 +157,60 @@ def _stream_duration(stream: dict) -> float | None:
         return None
 
 
+def _hash_source(path: Path, ctx, *, stage: str, message: str, before=None) -> tuple[str, dict]:
+    """Read every byte, with bounded progress writes and cheap mutation guards."""
+    ctx.check_cancel()
+    before = _source_signature(path) if before is None else before
+    digest = hashlib.sha256()
+    count = 0
+    ctx.progress(stage, 0, before["size"], unit="bytes", current_item=path.name, message=message)
+    last_progress = time.monotonic()
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as source:
+            if descriptor_signature(source.fileno()) != before:
+                raise TaskError("SOURCE_CHANGED", f"素材 {path.name} 在读取期间发生变化，请稍后重试。")
+            while True:
+                ctx.check_cancel()
+                chunk = source.read(_CHUNK_BYTES)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                count += len(chunk)
+                if count > before["size"]:
+                    raise TaskError("SOURCE_CHANGED", f"素材 {path.name} 在读取期间发生变化，请稍后重试。")
+                ctx.heartbeat()
+                now = time.monotonic()
+                if now - last_progress >= _HASH_PROGRESS_SECONDS or count == before["size"]:
+                    ctx.progress(stage, count, before["size"], unit="bytes", current_item=path.name, message=message)
+                    last_progress = now
+            unchanged_handle = descriptor_signature(source.fileno()) == before
+    except OSError as exc:
+        raise TaskError("MEDIA_UNREADABLE", f"无法完整读取素材 {path.name}。", retryable=True) from exc
+    after = _source_signature(path)
+    if not unchanged_handle or after != before or count != before["size"]:
+        raise TaskError("SOURCE_CHANGED", f"素材 {path.name} 在读取期间发生变化，请稍后重试。")
+    ctx.check_cancel()
+    return "sha256:" + digest.hexdigest(), after
+
+
+def verify_identity(path: Path, media_id: str, ctx, *, stage="verify", message="重新核验素材完整内容身份。") -> None:
+    """Re-read SHA-256 at publication boundaries; metadata alone is insufficient.
+
+    Native change timestamps can collide during rapid writes. Range requests
+    retain their cheap metadata guard; this explicit operation checks content.
+    It does not rerun ffprobe and can be cancelled between bounded read chunks.
+    """
+    ctx.check_cancel()
+    if not isinstance(media_id, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", media_id) is None:
+        raise TaskError("INVALID_MEDIA_ID", "素材缺少有效的完整内容身份，请重新扫描。", retryable=False)
+    path = Path(path)
+    actual, _ = _hash_source(path, ctx, stage=stage, message=message)
+    if actual != media_id:
+        raise TaskError("SOURCE_CHANGED", f"素材 {path.name} 的内容与已核验身份不一致，未发布结果。请重新扫描。")
+
+
 def probe_and_hash(item: dict, ctx) -> dict:
     """Inspect actual streams and hash every byte, refusing a changing source."""
     path = Path(item["path"])
@@ -191,33 +248,7 @@ def probe_and_hash(item: dict, ctx) -> dict:
     if duration is None:
         raise TaskError("INVALID_MEDIA", f"素材 {path.name} 缺少有效时长。", retryable=False)
     ctx.progress("probe", 1, 1, unit="files", current_item=path.name, message="媒体信息已读取。")
-    digest = hashlib.sha256()
-    count = 0
-    ctx.progress("hash", 0, before["size"], unit="bytes", current_item=path.name, message="验证素材完整身份。")
-    try:
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
-        with os.fdopen(descriptor, "rb") as source:
-            if descriptor_signature(source.fileno()) != before:
-                raise TaskError("SOURCE_CHANGED", f"素材 {path.name} 在读取期间发生变化，请稍后重试。", retryable=True)
-            while True:
-                ctx.check_cancel()
-                chunk = source.read(_CHUNK_BYTES)
-                if not chunk:
-                    break
-                digest.update(chunk)
-                count += len(chunk)
-                if count > before["size"]:
-                    raise TaskError("SOURCE_CHANGED", f"素材 {path.name} 在读取期间发生变化，请稍后重试。", retryable=True)
-                ctx.heartbeat()
-                ctx.progress("hash", count, before["size"], unit="bytes", current_item=path.name)
-            unchanged_handle = descriptor_signature(source.fileno()) == before
-    except OSError as exc:
-        raise TaskError("MEDIA_UNREADABLE", f"无法完整读取素材 {path.name}。", retryable=True) from exc
-    after = _source_signature(path)
-    if not unchanged_handle or after != before or count != before["size"]:
-        raise TaskError("SOURCE_CHANGED", f"素材 {path.name} 在读取期间发生变化，请稍后重试。", retryable=True)
-    ctx.check_cancel()
+    identity, after = _hash_source(path, ctx, stage="hash", message="验证素材完整身份。", before=before)
     timecode = None
     for source in videos + [media_format] + audios:
         tags = source.get("tags", {})
@@ -229,7 +260,6 @@ def probe_and_hash(item: dict, ctx) -> dict:
         if timecode:
             break
     video = videos[0] if videos else {}
-    identity = "sha256:" + digest.hexdigest()
     return {
         "id": identity,
         "media_id": identity,

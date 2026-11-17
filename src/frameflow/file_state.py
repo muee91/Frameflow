@@ -1,7 +1,8 @@
 """Cheap local change detection with identical path/handle semantics.
 
-This is a local binding guard, never a shared media identity. SHA-256 still owns
-identity. All snapshots come from an open handle: Python 3.12 Windows path stat
+This is a cheap local metadata guard, not proof of unchanged content: filesystem
+timestamps can collide during rapid writes. Publication boundaries must verify
+the full SHA-256 identity. All snapshots come from an open handle: Windows path stat
 and fstat can expose different meanings for ctime. Windows uses the documented
 FILE_BASIC_INFO.ChangeTime explicitly; POSIX uses fstat's metadata-change time.
 """

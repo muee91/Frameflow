@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import frameflow
 from frameflow.errors import TaskError
+from frameflow.file_state import path_signature
 from frameflow.jobs import JobManager, WorkspaceLock
 
 
@@ -28,6 +29,15 @@ def fake_result(assets):
             for a in assets
         ],
     }
+
+
+def overwrite_preserving_size_and_mtime(path):
+    before = path.stat()
+    with path.open("r+b") as source:
+        initial = source.read(1)
+        source.seek(0)
+        source.write(bytes([initial[0] ^ 1]))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
 
 
 class JobTests(unittest.TestCase):
@@ -131,11 +141,16 @@ class JobTests(unittest.TestCase):
             return fake_result(assets)
 
         self.engine.synchronize = change_source
-        job = self.manager.submit(self.project["id"])
-        failed = self.wait_for(job["id"])
+        unchanged_metadata = {path: path_signature(path) for path in self.media.iterdir()}
+        # Reproduce a native timestamp collision deterministically; the new
+        # publication check must reject the bytes even when the fast guard passes.
+        with patch("frameflow.store.path_signature", side_effect=lambda path: unchanged_metadata[Path(path)]):
+            job = self.manager.submit(self.project["id"])
+            failed = self.wait_for(job["id"])
         self.assertEqual(failed["state"], "failed")
         self.assertEqual(failed["error_code"], "SOURCE_CHANGED")
         self.assertIsNone(failed["artifact"])
+        self.assertTrue(any(event["stage"] == "verify" for event in self.manager.store.events(job["id"])))
         with self.assertRaises(KeyError):
             self.manager.store.result(self.project["id"])
 
@@ -181,9 +196,11 @@ class JobTests(unittest.TestCase):
                                                clip_id=clip["id"], status="approved", reason="合成数据人工确认。")
         called = []
         self.engine.export_fcpxml = lambda *args: called.append(args)
-        (self.media / "A.mov").write_bytes(b"source changed after review")
-        export = self.manager.submit(self.project["id"], kind="export", revision=result["revision"], format="fcpxml")
-        failed = self.wait_for(export["id"])
+        unchanged_metadata = {path: path_signature(path) for path in self.media.iterdir()}
+        overwrite_preserving_size_and_mtime(self.media / "A.mov")
+        with patch("frameflow.store.path_signature", side_effect=lambda path: unchanged_metadata[Path(path)]):
+            export = self.manager.submit(self.project["id"], kind="export", revision=result["revision"], format="fcpxml")
+            failed = self.wait_for(export["id"])
         self.assertEqual(failed["state"], "failed")
         self.assertEqual(failed["error_code"], "SOURCE_CHANGED")
         self.assertIsNone(failed["artifact"])
@@ -241,6 +258,7 @@ class JobTests(unittest.TestCase):
             result = self.manager.store.review(self.project["id"], revision=result["revision"],
                                                clip_id=clip["id"], status="approved", reason="导出前合成数据核对。")
         produced = []
+        unchanged_metadata = {path: path_signature(path) for path in self.media.iterdir()}
 
         def mutate_while_exporting(_executable, _raw, _result, output_dir, _ctx, *, verified_paths):
             output_dir.mkdir()
@@ -248,12 +266,13 @@ class JobTests(unittest.TestCase):
             candidate.write_text('<fcpxml version="1.11"/>')
             produced.append(candidate)
             source = Path(next(iter(verified_paths.values())))
-            source.write_bytes(b"source changed while exporter was running")
+            overwrite_preserving_size_and_mtime(source)
             return candidate
 
         self.engine.export_fcpxml = mutate_while_exporting
-        export = self.manager.submit(self.project["id"], kind="export", revision=result["revision"], format="fcpxml")
-        finished = self.wait_for(export["id"], states=("succeeded", "failed", "cancelled"))
+        with patch("frameflow.store.path_signature", side_effect=lambda path: unchanged_metadata[Path(path)]):
+            export = self.manager.submit(self.project["id"], kind="export", revision=result["revision"], format="fcpxml")
+            finished = self.wait_for(export["id"], states=("succeeded", "failed", "cancelled"))
         self.assertEqual(finished["state"], "failed", finished)
         self.assertEqual(finished["error_code"], "SOURCE_CHANGED")
         self.assertIsNone(finished["artifact"])

@@ -134,7 +134,9 @@ class JobManager:
                 verified_paths = {}
                 for clip in source["clips"]:
                     if clip["status"] == "approved":
-                        verified_paths[clip["media_id"]] = self.store.checked_binding(job["project_id"], clip["media_id"])
+                        path = self.store.checked_binding(job["project_id"], clip["media_id"])
+                        media.verify_identity(path, clip["media_id"], ctx, message="交付前复核：逐字节核验素材完整身份。")
+                        verified_paths[clip["media_id"]] = path
                 raw_path = self.workspace / "runs" / source["job_id"] / "align-result.json"
                 output = engine.export_fcpxml(info["executable"], raw_path, source, run_dir / "export", ctx,
                                               verified_paths=verified_paths)
@@ -142,6 +144,7 @@ class JobManager:
                 for media_id, exact_path in verified_paths.items():
                     if self.store.checked_binding(job["project_id"], media_id) != exact_path:
                         raise TaskError("SOURCE_CHANGED", "交付期间素材绑定已变化，未发布本次工程。")
+                    media.verify_identity(exact_path, media_id, ctx, message="交付后复核：确认导出期间素材内容未变化。")
                 # Only the filename is public; the local path stays in the workspace.
                 if not output.resolve().is_relative_to(run_dir.resolve()) or not output.is_file():
                     raise TaskError("INVALID_EXPORT_PATH", "导出器返回了无效文件位置。", False)
@@ -169,6 +172,8 @@ class JobManager:
                 ctx.check_cancel()
                 if self.store.checked_binding(job["project_id"], asset["media_id"]) != Path(asset["local_path"]):
                     raise TaskError("SOURCE_CHANGED", f"分析期间素材发生变化：{asset['name']}。请重试。")
+                media.verify_identity(Path(asset["local_path"]), asset["media_id"], ctx,
+                                      message="同步后复核：发布候选结果前核验素材完整身份。")
             self.store.finish(job_id, "needs_review", result=result)
         except TaskCancelled:
             self.store.finish(job_id, "cancelled")
