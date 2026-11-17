@@ -19,6 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import __version__, engine
 from .errors import Conflict, TaskError
 from .jobs import JobManager
+from .file_state import path_signature
+from .waveform import cached_waveform
 
 
 class RootInput(BaseModel):
@@ -211,6 +213,17 @@ def create_app(workspace: Path, *, engine_path=None, token=None, allowed_hosts=N
         path = store().checked_binding(project_id, media_id)
         return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
 
+    @app.get("/api/projects/{project_id}/waveform/{media_id}")
+    def waveform(project_id: str, media_id: str):
+        path = store().checked_binding(project_id, media_id)
+        signature = path_signature(path)
+        image = cached_waveform(path, manager().workspace / "waveforms", media_id, signature)
+        # A source changed during FFmpeg decoding must not be presented as current.
+        verified = store().checked_binding(project_id, media_id)
+        if verified != path or path_signature(verified) != signature:
+            raise TaskError("SOURCE_CHANGED", "素材已变化，请重新扫描。")
+        return FileResponse(image, media_type="image/png")
+
     @app.get("/api/projects/{project_id}/export")
     def manifest(project_id: str, format: str = "manifest"):
         if format != "manifest":
@@ -256,6 +269,11 @@ def create_app(workspace: Path, *, engine_path=None, token=None, allowed_hosts=N
     @app.get("/static/app.js")
     def script():
         return FileResponse(static / "app.js", media_type="text/javascript")
+
+    @app.get("/timeline.js")
+    @app.get("/static/timeline.js")
+    def timeline_script():
+        return FileResponse(static / "timeline.js", media_type="text/javascript")
 
     @app.get("/style.css")
     @app.get("/static/style.css")
