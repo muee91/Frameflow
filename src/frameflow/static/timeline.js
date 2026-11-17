@@ -259,5 +259,5 @@
     });
   }
   init();
-  window.FrameflowTimeline = { mount, setPosition, selectClip };
+  window.FrameflowTimeline = { mount, setPosition, selectClip, refresh: render };
 })();
