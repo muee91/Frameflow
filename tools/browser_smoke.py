@@ -138,6 +138,14 @@ def failure_diagnostic(error, stage, page=None):
                 timelineSeconds: Number(document.querySelector('#timeline-seek')?.value || 0),
                 reviewVisible: !document.querySelector('#review-panel')?.hidden,
                 exportDownloadVisible: !document.querySelector('#download-export')?.hidden,
+                reviewForms: [...document.querySelectorAll('.clip-form')].map((form, index) => ({
+                    index, valid: [...form.elements].every(item => !item.willValidate || item.validity.valid),
+                    constraints: [...form.querySelectorAll('input, textarea, select')].map(input => ({
+                        type: input.type, stepMismatch: input.validity.stepMismatch,
+                        valueMissing: input.validity.valueMissing, badInput: input.validity.badInput,
+                        rangeOverflow: input.validity.rangeOverflow, rangeUnderflow: input.validity.rangeUnderflow
+                    }))
+                })),
                 media: [...document.querySelectorAll('.clip-card video, .clip-card audio')].map((media, index) => ({
                     index, kind: media.tagName, currentTime: media.currentTime,
                     duration: Number.isFinite(media.duration) ? media.duration : null,
@@ -265,6 +273,8 @@ def run_gate(artifacts: Path, timeout: float):
                         checkpoint(f"review-clip-{index + 1}")
                         card = page.locator(".clip-card").filter(has=page.get_by_role("heading", name=clip["name"], exact=True))
                         card.get_by_label(f"{clip['name']} 核对备注", exact=True).fill("合成测试：浏览器已播放并核对共同时间轴")
+                        require(card.locator("form").evaluate("form => form.checkValidity()"),
+                                "Native form constraints rejected the exact engine offset or review input.")
                         with page.expect_response(lambda response: response.url == f"{origin}/api/projects/{project_id}/review"
                                                   and response.request.method == "POST") as reviewed:
                             card.get_by_role("button", name="确认位置", exact=True).click()

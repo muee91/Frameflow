@@ -50,6 +50,7 @@
     probe: "读取媒体信息",
     hash: "校验素材身份",
     sync: "寻找同步关系",
+    verify: "复核素材完整身份",
     review: "准备核对",
     export: "导出工程候选",
   };
@@ -507,7 +508,7 @@
       `${stageTitles[job.stage] || job.stage || "准备中"}${measurable ? ` · ${completed.toLocaleString()} / ${total.toLocaleString()} ${unit}` : " · 进度由处理器报告"}`;
     const stages = ["scan", "probe", "sync", "review"];
     const stageIndex = stages.indexOf(
-      job.stage === "hash" ? "probe" : job.stage,
+      job.stage === "hash" ? "probe" : job.stage === "verify" ? "review" : job.stage,
     );
     document.querySelectorAll(".stage-list li").forEach((li, index) => {
       li.classList.toggle("active", index === stageIndex);
@@ -947,7 +948,9 @@
     offsetLabel.append(element("span", "", "在同步组中的起点（秒）"));
     const offset = element("input");
     offset.type = "number";
-    offset.step = "0.001";
+    // Engine mappings may be more precise than a millisecond; the form must
+    // preserve them instead of blocking approval with a native step mismatch.
+    offset.step = "any";
     offset.value = mapped ? String(numeric(clip.offset_seconds, 0)) : "";
     offset.placeholder = "填写人工位置";
     offset.setAttribute("aria-label", `${clip.name} 同步起点秒数`);

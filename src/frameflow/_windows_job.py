@@ -24,7 +24,9 @@ class WindowsJob:
         # No name or inheritable security attributes: only this runner owns the
         # handle, so closing it also covers Frameflow exiting unexpectedly.
         self.assigned = False
-        self._handle = win32job.CreateJobObject(None, None)
+        # pywin32 requires a string here; use the unnamed-job form also used
+        # by Chromium's testing/test_env.py, not the C API's NULL spelling.
+        self._handle = win32job.CreateJobObject(None, "")
         try:
             limits = win32job.QueryInformationJobObject(
                 self._handle, win32job.JobObjectExtendedLimitInformation
