@@ -263,6 +263,16 @@ def run_gate(artifacts: Path, timeout: float):
                         const media = card.querySelector('video, audio');
                         return !media.seeking && Math.abs(media.currentTime - expected[card.querySelector('h3').textContent]) < 0.12;
                     })""", arg=expected, timeout=15_000)
+                    checkpoint("persist-sync-marker")
+                    with page.expect_response(lambda response: response.url == f"{origin}/api/projects/{project_id}/markers"
+                                              and response.request.method == "POST") as saved_marker:
+                        page.locator("#add-sync-marker").click()
+                    require(saved_marker.value.status == 201, "Timeline checkpoint was not saved.")
+                    marker = saved_marker.value.json()
+                    require(page.locator(".timeline-marker").count() == 1,
+                            "Saved marker is not visible on the real timeline.")
+                    require(get_json(client, f"/api/projects/{project_id}/markers")[0]["id"] == marker["id"],
+                            "Marker storage did not persist across API reads.")
                     checkpoint("keyboard-frame-step")
                     page.locator("#timeline-viewport").focus()
                     at = float(page.locator("#timeline-seek").input_value())
