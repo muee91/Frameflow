@@ -44,6 +44,13 @@ class ReviewInput(BaseModel):
     group_id: str | None = None
 
 
+class MarkerInput(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False, strict=True)
+    group_id: str = Field(min_length=1, max_length=128)
+    time_seconds: float
+    label: str = Field(default="标记", min_length=1, max_length=64)
+
+
 class UndoInput(BaseModel):
     model_config = ConfigDict(strict=True)
     revision: int = Field(ge=1)
@@ -218,6 +225,18 @@ def create_app(workspace: Path, *, engine_path=None, token=None, allowed_hosts=N
     @app.post("/api/projects/{project_id}/review/undo")
     def undo_review(project_id: str, body: UndoInput):
         return present_result(project_id, store().undo_last_review(project_id, **body.model_dump()))
+
+    @app.get("/api/projects/{project_id}/markers")
+    def markers(project_id: str):
+        return store().markers(project_id)
+
+    @app.post("/api/projects/{project_id}/markers", status_code=201)
+    def add_marker(project_id: str, body: MarkerInput):
+        return store().add_marker(project_id, **body.model_dump())
+
+    @app.delete("/api/projects/{project_id}/markers/{marker_id}")
+    def delete_marker(project_id: str, marker_id: str):
+        return store().delete_marker(project_id, marker_id)
 
     @app.get("/api/projects/{project_id}/media/{media_id}")
     @app.head("/api/projects/{project_id}/media/{media_id}")
