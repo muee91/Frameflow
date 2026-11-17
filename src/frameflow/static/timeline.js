@@ -29,6 +29,35 @@
     const decimal = precise ? "." + String(Math.floor((abs - whole) * 1000)).padStart(3, "0") : "";
     return (seconds < 0 ? "−" : "") + hour + ":" + minute + ":" + second + decimal;
   };
+  function mappingSegments(clip) {
+    if (clip.blocked_reason !== "NONLINEAR_MAPPING" || !Array.isArray(clip.mapping)) return [];
+    const points = clip.mapping.map((point) => {
+      const sx = point?.source, sy = point?.island;
+      const source = number(sx?.value), st = number(sx?.timescale);
+      const island = number(sy?.value), it = number(sy?.timescale);
+      if (source === null || st <= 0 || island === null || it <= 0) return null;
+      return { source: source / st, timeline: island / it };
+    });
+    if (points.length < 2 || points.some(point => !point)) return [];
+    const segments = [];
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1], b = points[i];
+      if (b.source <= a.source || b.timeline <= a.timeline ||
+          !Number.isFinite(b.timeline) || !Number.isFinite(a.timeline) ||
+          Math.max(Math.abs(a.timeline), Math.abs(b.timeline)) > 7 * 86400) return [];
+      segments.push({ start: a.timeline, end: b.timeline,
+        sourceStart: a.source, sourceEnd: b.source, index: i });
+    }
+    return segments;
+  }
+  function positionExtent(clip) {
+    const parts = mappingSegments(clip);
+    if (parts.length) return { start: parts[0].start, end: parts[parts.length - 1].end };
+    const start = number(clip.offset_seconds), duration = number(clip.duration);
+    const rate = number(clip.rate) ?? 1;
+    if (clip.blocked_reason || start === null || duration === null || duration <= 0 || rate <= 0) return null;
+    return { start, end: start + duration * rate };
+  }
   function tracksFor(clips) {
     const found = new Map();
     for (const clip of clips) {
@@ -45,13 +74,11 @@
       for (const clip of [...track.clips].sort((a, b) =>
         (number(a.offset_seconds) ?? Infinity) - (number(b.offset_seconds) ?? Infinity))) {
         clip._trackRow = 0;
-        const start = number(clip.offset_seconds);
-        const duration = number(clip.duration);
-        const rate = number(clip.rate) ?? 1;
-        if (clip.blocked_reason || start === null || duration === null || duration <= 0 || rate <= 0) continue;
-        let row = ends.findIndex((end) => end <= start + 0.0001);
+        const extent = positionExtent(clip);
+        if (!extent) continue;
+        let row = ends.findIndex((end) => end <= extent.start + 0.0001);
         if (row === -1) row = ends.length;
-        ends[row] = start + duration * rate;
+        ends[row] = extent.end;
         clip._trackRow = row;
       }
       track.rows = Math.max(1, ends.length);
@@ -78,6 +105,26 @@
     const x = Math.min(Math.max(event.clientX - rect.left, 0), model.width);
     model.onSeek(model.start + (x / model.width) * span());
   }
+  function snapOffset(clip, proposed, ignoreSnap) {
+    if (ignoreSnap) return { offset: proposed, snapped: false };
+    const tolerance = span() * 9 / Math.max(1, model.width);
+    const length = (number(clip.duration) || 0) * (number(clip.rate) || 1);
+    const candidates = [model.position, model.start];
+    for (const other of model.clips) {
+      if (String(other.id) === String(clip.id) || other.status === "excluded") continue;
+      const extent = positionExtent(other);
+      if (extent) candidates.push(extent.start, extent.end);
+    }
+    let best = { offset: proposed, snapped: false, distance: tolerance };
+    for (const edge of candidates) {
+      for (const shift of [0, length]) {
+        const target = edge - shift;
+        const distance = Math.abs(proposed - target);
+        if (distance < best.distance) best = { offset: target, snapped: true, distance };
+      }
+    }
+    return best;
+  }
   function beginDrag(event, clip, bar) {
     if (event.button !== 0) return;
     event.stopPropagation();
@@ -93,7 +140,10 @@
       const delta = ev.clientX - startX;
       if (Math.abs(delta) > 3) moved = true;
       if (!moved) return;
-      target = original + delta / width * span();
+      const candidate = original + delta / width * span();
+      const snapped = snapOffset(clip, candidate, ev.shiftKey);
+      target = snapped.offset;
+      bar.classList.toggle("is-snapped", snapped.snapped);
       const left = ratio(target) * 100;
       bar.style.left = left + "%";
       bar.classList.add("is-dragging");
@@ -105,7 +155,7 @@
       bar.removeEventListener("pointerup", finish);
       bar.removeEventListener("pointercancel", finish);
       if (bar.hasPointerCapture(ev.pointerId)) bar.releasePointerCapture(ev.pointerId);
-      bar.classList.remove("is-dragging");
+      bar.classList.remove("is-dragging", "is-snapped");
       bar.style.left = ratio(original) * 100 + "%";
       const adjustment = bar.querySelector(".track-adjustment");
       if (adjustment) adjustment.textContent = "";
@@ -161,6 +211,23 @@
         const offset = number(clip.offset_seconds);
         const duration = number(clip.duration);
         const rate = number(clip.rate) ?? 1;
+        const pieces = mappingSegments(clip);
+        if (pieces.length) {
+          for (const piece of pieces) {
+            const part = pick("button", "track-segment", "段 " + piece.index);
+            part.type = "button";
+            part.dataset.clipId = String(clip.id);
+            part.style.left = ratio(piece.start) * 100 + "%";
+            part.style.width = Math.max(0.001, (piece.end - piece.start) / span() * 100) + "%";
+            part.style.top = (4 + (clip._trackRow || 0) * 46) + "px";
+            part.title = "候选分段映射：源 " + unit(piece.sourceStart, true) + " → " +
+              unit(piece.sourceEnd, true) + "，公共时间 " + unit(piece.start, true) +
+              " → " + unit(piece.end, true) + "；尚未通过核对";
+            part.addEventListener("click", () => model.onSelect?.(String(clip.id)));
+            lane.append(part);
+          }
+          continue;
+        }
         if (clip.blocked_reason || offset === null || duration === null || duration <= 0 || rate <= 0) {
           const missing = pick("button", "track-unmatched" + (clip.blocked_reason ? " is-blocked" : ""), clip.name || "未定位素材");
           missing.type = "button";
@@ -229,7 +296,7 @@
     model.selected = id === null || id === undefined ? null : String(id);
     const root = $("timeline-content");
     if (!root) return;
-    root.querySelectorAll(".track-clip").forEach((clip) =>
+    root.querySelectorAll(".track-clip, .track-segment, .track-unmatched").forEach((clip) =>
       clip.classList.toggle("is-selected", clip.dataset.clipId === model.selected));
   }
   function mount(options) {
@@ -254,6 +321,11 @@
     $("zoom-in")?.addEventListener("click", () => setZoom(model.zoom * 1.6));
     $("zoom-out")?.addEventListener("click", () => setZoom(model.zoom / 1.6));
     $("zoom-fit")?.addEventListener("click", () => setZoom(1));
+    $("timeline-viewport")?.addEventListener("wheel", (event) => {
+      if (!event.altKey) return;
+      event.preventDefault();
+      setZoom(model.zoom * (event.deltaY < 0 ? 1.25 : 0.8));
+    }, { passive: false });
     window.addEventListener("resize", () => {
       if (model.clips.length) render();
     });
