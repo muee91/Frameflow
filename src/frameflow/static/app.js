@@ -1903,5 +1903,7 @@
     }
     poll();
   }
+  // Pure mapping helpers are exposed for synthetic precision checks only.
+  window.FrameflowMapping = Object.freeze({ sourceAt, timelineAt, rateAt, isPreviewable });
   initialize();
 })();
