@@ -73,6 +73,18 @@ class UIContractTests(unittest.TestCase):
                     self.assertTrue(Path(response.path).is_file())
                     self.assertTrue(Path(response.path).read_bytes())
 
+    def test_multitrack_workspace_exposes_real_controls(self):
+        expected = {
+            "source-list", "review-queue", "clip-grid", "inspector-body",
+            "timeline-viewport", "timeline-content", "timeline-track-headings",
+            "zoom-in", "zoom-out", "zoom-fit", "timeline-seek", "audio-select",
+        }
+        self.assertTrue(expected.issubset(set(self.parser.ids)))
+        source = files("frameflow").joinpath("static", "timeline.js").read_text(encoding="utf-8")
+        self.assertIn("FrameflowTimeline", source)
+        self.assertIn("track-waveform", source)
+        self.assertIn("onDragOffset", source)
+
     def test_shell_is_compatible_with_the_same_origin_csp(self):
         """Inline execution would silently fail under api.py's CSP."""
         self.assertEqual(self.parser.inline_handlers, [])
