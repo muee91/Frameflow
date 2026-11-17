@@ -42,6 +42,31 @@ class StoreTests(unittest.TestCase):
         self.store.finish(job["id"], "needs_review", result=candidate_result())
         return job, self.store.result(self.project_id)
 
+    def test_undo_last_review_restores_offset_but_never_auto_approves(self):
+        _, baseline = self.publish()
+        approved = self.store.review(
+            self.project_id, revision=baseline["revision"], clip_id="clip-A",
+            status="approved", offset_seconds=0.0, reason="合成基线已听看。")
+        changed = self.store.review(
+            self.project_id, revision=approved["revision"], clip_id="clip-A",
+            status="proposed", offset_seconds=0.37, reason="开始人工偏移修正。")
+        self.assertEqual(self.store.last_undoable_clip(self.project_id, changed["revision"], changed["job_id"]), "clip-A")
+        with self.assertRaises(Conflict):
+            self.store.undo_last_review(self.project_id, revision=approved["revision"], clip_id="clip-A")
+        with self.assertRaises(Conflict):
+            self.store.undo_last_review(self.project_id, revision=changed["revision"], clip_id="clip-B")
+        undone = self.store.undo_last_review(
+            self.project_id, revision=changed["revision"], clip_id="clip-A")
+        first = next(c for c in undone["clips"] if c["id"] == "clip-A")
+        self.assertEqual(first["offset_seconds"], 0.0)
+        self.assertEqual(first["status"], "proposed")
+        self.assertEqual(undone["revision"], changed["revision"] + 1)
+        self.assertIsNone(self.store.last_undoable_clip(self.project_id, undone["revision"], undone["job_id"]))
+        self.assertEqual(self.store.job(undone["job_id"])["state"], "needs_review")
+        self.assertIn("撤销最近一次修订", self.store.review_history(self.project_id)[-1]["reason"])
+        with self.assertRaises(Conflict):
+            self.store.undo_last_review(self.project_id, revision=undone["revision"], clip_id="clip-A")
+
     def test_queued_cancellation_cannot_start_or_publish(self):
         job = self.store.create_job(self.project_id)
         self.store.cancel(job["id"])
