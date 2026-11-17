@@ -1138,7 +1138,10 @@
     nudge.disabled = Boolean(clip.blocked_reason);
     nudgeBack.disabled = Boolean(clip.blocked_reason);
     if (groupInput) groupInput.disabled = Boolean(clip.blocked_reason);
-    actions.append(apply, approve, exclude);
+    const undo = element("button", "button quiet compact", "撤销最近一次修正");
+    undo.type = "button";
+    undo.disabled = state.result?.undo_clip_id !== String(clip.id);
+    actions.append(apply, approve, exclude, undo);
     form.append(actions);
     const save = async (status) => {
       if (status !== "excluded" && (clip.blocked_reason || player.failed)) {
@@ -1236,6 +1239,31 @@
     });
     apply.addEventListener("click", () => save("proposed"));
     exclude.addEventListener("click", () => save("excluded"));
+    undo.addEventListener("click", async () => {
+      if (state.result?.undo_clip_id !== String(clip.id)) return;
+      pausePlayback();
+      const generation = state.generation;
+      const checkpoint = state.position;
+      const monitor = $("audio-select").value;
+      undo.disabled = true;
+      try {
+        const result = await post(`/api/projects/${encodeURIComponent(state.project.id)}/review/undo`, {
+          revision: state.result.revision, clip_id: clip.id,
+        });
+        if (generation !== state.generation) return;
+        state.result = result;
+        renderResult();
+        state.position = Math.min(state.end, Math.max(state.start, checkpoint));
+        if ([...$("audio-select").options].some(option => option.value === monitor))
+          $("audio-select").value = monitor;
+        updateTransport();
+        showNotice("已撤销最近修订，仍需重新播放核对。");
+      } catch (error) {
+        if (generation !== state.generation) return;
+        showNotice(error.status === 409 ? "当前结果已变化，请重新选择素材。" : error.message, "warning");
+        if (error.status === 409) await loadResult(generation);
+      }
+    });
     info.append(form);
     info.append(
       element(
@@ -1472,6 +1500,41 @@
     }
     if (state.playing) state.animation = requestAnimationFrame(animationFrame);
   }
+  function stepTimeline(direction, seconds = null) {
+    if (!state.result || !state.reviewVisible) return;
+    const video = groupClips().find(clip => clip.has_video && hasMapping(clip) && positiveFrameRate(clip.fps));
+    const fps = video && positiveFrameRate(video.fps);
+    if (seconds === null && !fps) {
+      showNotice("当前同步组没有有效的项目帧率，不能逐帧移动。", "warning");
+      return;
+    }
+    pausePlayback();
+    const delta = seconds === null ? 1 / fps : seconds;
+    state.position = Math.max(state.start, Math.min(state.end, state.position + direction * delta));
+    updateTransport();
+  }
+  function keyboardTransport(event) {
+    if (!state.result || !state.reviewVisible || event.ctrlKey || event.metaKey || event.altKey) return;
+    const target = event.target;
+    if (target?.closest?.("input, textarea, select, button, [contenteditable], [role='textbox']")) return;
+    const key = event.key.toLowerCase();
+    if (key === " " && !event.shiftKey) {
+      event.preventDefault();
+      togglePlay();
+    } else if (key === "k" && !event.shiftKey) {
+      event.preventDefault();
+      pausePlayback();
+    } else if (key === "l" && !event.shiftKey) {
+      event.preventDefault();
+      if (!state.playing) togglePlay();
+    } else if (key === "j" && !event.shiftKey) {
+      event.preventDefault();
+      stepTimeline(-1);
+    } else if (key === "arrowleft" || key === "arrowright") {
+      event.preventDefault();
+      stepTimeline(key === "arrowleft" ? -1 : 1, event.shiftKey ? 1 : null);
+    }
+  }
   function togglePlay() {
     if (state.playing) {
       pausePlayback();
@@ -1654,6 +1717,7 @@
       if (document.hidden) pausePlayback();
     });
     window.addEventListener("beforeunload", pausePlayback);
+    document.addEventListener("keydown", keyboardTransport);
     addSource("camera");
     addSource("recorder");
     try {
