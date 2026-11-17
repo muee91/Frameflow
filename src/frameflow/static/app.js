@@ -935,8 +935,15 @@
     media.setAttribute("aria-label", `${clip.name} 播放器`);
     const url = safeMediaUrl(clip.media_url);
     if (url) media.src = url;
-    if (!clip.has_video)
-      wrap.append(element("span", "audio-symbol", "▂ ▆ ▃ ▇ ▄ ▂"));
+    if (!clip.has_video && clip.has_audio && state.project) {
+      const waveform = element("img", "audio-waveform-inspector");
+      waveform.src = "/api/projects/" + encodeURIComponent(state.project.id) +
+        "/waveform/" + encodeURIComponent(clip.media_id);
+      waveform.alt = "录音波形";
+      waveform.loading = "lazy";
+      waveform.addEventListener("error", () => { waveform.hidden = true; });
+      wrap.append(waveform);
+    }
     wrap.append(media);
     const overlay = element(
       "span",
