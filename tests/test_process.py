@@ -73,6 +73,24 @@ class ProcessTests(unittest.TestCase):
             run_command([sys.executable, "-c", "import time; time.sleep(30)"], Context(), timeout=0.2)
         self.assertEqual(error.exception.code, "PROCESS_TIMEOUT")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX group signalling")
+    def test_permission_denied_during_group_probe_does_not_mask_timeout(self):
+        original = os.killpg
+        observed = []
+
+        def transient_probe(pgid, signum):
+            if signum == 0 and not observed:
+                observed.append(pgid)
+                raise PermissionError("macOS group probe temporarily denied")
+            return original(pgid, signum)
+
+        with patch("frameflow.process.os.killpg", side_effect=transient_probe):
+            with self.assertRaises(TaskError) as error:
+                run_command([sys.executable, "-c", "import time; time.sleep(30)"],
+                            Context(), timeout=0.2)
+        self.assertEqual(error.exception.code, "PROCESS_TIMEOUT")
+        self.assertTrue(observed)
+
     def test_nonzero_exit_and_missing_tool_are_distinct(self):
         with self.assertRaises(TaskError) as error:
             run_command([sys.executable, "-c", "raise SystemExit(7)"], Context(), timeout=5)
