@@ -121,6 +121,40 @@ def _mapping(points, duration: float) -> tuple[float | None, float, str | None]:
     return float(offset), float(rate), None
 
 
+def _full_source_mapping(points, engine_duration: float, clip: dict):
+    """Retain a proven subframe audio tail without accepting partial mappings.
+
+    Apple's inspector can use the video end rather than the container/audio
+    end. Only extend an already complete, constant-offset engine mapping when
+    ffprobe independently proves both stream ends. Keep raw engine evidence.
+    """
+    offset, rate, blocked = _mapping(points, engine_duration)
+    full_duration = _number(clip.get("duration"))
+    if abs(full_duration - engine_duration) <= 0.001:
+        return deepcopy(points), None
+    try:
+        frame = 1 / Fraction(str(clip.get("fps")))
+    except (ValueError, ZeroDivisionError):
+        raise _invalid("素材尾部时长差异缺少有效帧率证据。") from None
+    video_end = _number(clip.get("video_duration"))
+    audio_end = _number(clip.get("audio_duration"))
+    tail = full_duration - engine_duration
+    if (not clip.get("has_video") or not clip.get("has_audio") or
+            not 0 < frame <= 0.1 or not 0 < tail <= float(frame) + 2e-6 or
+            abs(video_end - engine_duration) > 2e-6 or abs(audio_end - full_duration) > 2e-6 or
+            abs(float(_time(points[-1]["source"])) - engine_duration) > 2e-6 or
+            blocked or offset is None or abs(rate - 1) > 1e-9):
+        raise _invalid("音视频范围差异缺少完整的恒定偏移及流时长证据。")
+    mapped = deepcopy(points)
+    first, last = mapped[0], mapped[-1]
+    x0, x1 = _time(first["source"]), _time(last["source"])
+    y0, y1 = _time(first["island"]), _time(last["island"])
+    end = Fraction(str(full_duration))
+    mapped.append({"source": _media_time(end), "island": _media_time(y1 + (end - x1) * (y1 - y0) / (x1 - x0))})
+    return mapped, {"basis": "verified_av_tail", "engine_duration": engine_duration,
+                    "retained_duration": full_duration, "tail_seconds": tail}
+
+
 def _clip(asset: dict) -> dict:
     media_id = asset.get("media_id") or asset.get("id")
     if not isinstance(media_id, str) or not media_id:
@@ -134,6 +168,7 @@ def _clip(asset: dict) -> dict:
         "kind": asset.get("kind") if asset.get("kind") in {"camera", "recorder"} else ("camera" if asset.get("has_video") else "recorder"),
         "camera": asset.get("camera", "未分类"),
         "duration": duration, "fps": asset.get("fps"),
+        "video_duration": asset.get("video_duration"), "audio_duration": asset.get("audio_duration"),
         "has_video": bool(asset.get("has_video")), "has_audio": bool(asset.get("has_audio")),
         "width": asset.get("width", 0), "height": asset.get("height", 0),
         "audio_channels": asset.get("audio_channels", 0),
@@ -157,6 +192,7 @@ def _normalise(raw, assets: list[dict]) -> dict:
     if len(by_path) != len(assets) or len({c["media_id"] for c in clips}) != len(clips):
         raise TaskError("DUPLICATE_MEDIA", "素材重复，请先合并相同内容的本机绑定。", retryable=False)
     by_engine: dict[str, dict] = {}
+    engine_durations = {}
     for item in project["clips"]:
         if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
             raise _invalid()
@@ -164,10 +200,12 @@ def _normalise(raw, assets: list[dict]) -> dict:
         if key not in by_path or item["id"] in by_engine or by_path[key]["engine_clip_id"] is not None:
             raise _invalid("同步引擎返回了重复或未授权的素材引用。")
         clip = by_path[key]
-        if abs(float(_time(item.get("duration"))) - clip["duration"]) > 0.1:
+        engine_duration = float(_time(item.get("duration")))
+        if engine_duration <= 0 or abs(engine_duration - clip["duration"]) > 0.1:
             raise _invalid("同步引擎读取的素材时长与已验证素材不一致。")
         clip["engine_clip_id"] = item["id"]
         by_engine[item["id"]] = clip
+        engine_durations[item["id"]] = engine_duration
     evidence_edges = []
     for match in raw["matches"]:
         if not isinstance(match, dict) or match.get("left") not in by_engine or match.get("right") not in by_engine:
@@ -229,7 +267,8 @@ def _normalise(raw, assets: list[dict]) -> dict:
                 mapping = placement.get("mapping")
                 if not isinstance(mapping, dict):
                     raise _invalid()
-                points = mapping.get("points")
+                original_points = mapping.get("points")
+                points, adjustment = _full_source_mapping(original_points, engine_durations[key], clip)
                 offset, rate, blocked = _mapping(points, clip["duration"])
                 evidence = sorted({e for a, b, e in evidence_edges if a in component and b in component and key in {a, b}})
                 reason = "已有音频同步建议，请播放核对后确认。" if "waveform" in evidence else "仅有时间码或连续文件元数据证据，必须人工核对。"
@@ -238,6 +277,9 @@ def _normalise(raw, assets: list[dict]) -> dict:
                 if blocked:
                     reason = "存在局部分段时间映射，已保留全部锚点；当前预览与导出不作线性近似。"
                 clip.update(group_id=group_id, offset_seconds=offset, rate=rate, status="proposed", reason=reason, evidence=evidence, mapping=deepcopy(points))
+                if adjustment:
+                    clip.update(range_adjustment=adjustment, original_mapping=deepcopy(original_points))
+                    clip["reason"] += f" 已按独立读取的流时长保留末尾 {adjustment['tail_seconds']:.6f} 秒音频，延用整体偏移，仍需核对。"
                 if blocked:
                     clip["blocked_reason"] = blocked
     warnings = []
@@ -363,7 +405,9 @@ are historical evidence and must never select the media used for delivery.
     for clip in approved:
         placement = original.get(clip["engine_clip_id"])
         if placement:
-            _, rate, blocked = _mapping(placement.get("mapping", {}).get("points"), clip["duration"])
+            points, _ = _full_source_mapping(placement.get("mapping", {}).get("points"),
+                                             float(_time(by_engine[clip["engine_clip_id"]]["duration"])), clip)
+            _, rate, blocked = _mapping(points, clip["duration"])
             if blocked or abs(rate - 1.0) > 1e-9:
                 raise TaskError("DRIFT_EXPORT_UNVERIFIED", "原同步结果包含未验收的漂移或分段映射。", retryable=False)
     if not isinstance(verified_paths, dict) or any(c["media_id"] not in verified_paths for c in approved):
@@ -382,7 +426,8 @@ are historical evidence and must never select the media used for delivery.
     origin = min(0.0, min(offsets))
     placements = []
     for clip, offset in zip(approved, offsets):
-        duration = _time(by_engine[clip["engine_clip_id"]]["duration"])
+        duration = Fraction(str(_number(clip["duration"])))
+        by_engine[clip["engine_clip_id"]]["duration"] = _media_time(duration)
         start = Fraction(str(offset)) - Fraction(str(origin))
         confidence = original.get(clip["engine_clip_id"], {}).get("confidence", 0.0)
         placements.append({"clipID": clip["engine_clip_id"], "confidence": confidence, "mapping": {"points": [{"source": {"value": 0, "timescale": 1}, "island": _media_time(start)}, {"source": _media_time(duration), "island": _media_time(start + duration)}]}})

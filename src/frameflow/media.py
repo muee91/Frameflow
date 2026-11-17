@@ -157,6 +157,15 @@ def _stream_duration(stream: dict) -> float | None:
         return None
 
 
+def _zero_start_duration(stream: dict) -> float | None:
+    """Evidence for the narrow AV-tail adapter, never guess an offset stream."""
+    try:
+        start = float(stream.get("start_time", 0))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return _stream_duration(stream) if math.isfinite(start) and abs(start) <= 2e-6 else None
+
+
 def _hash_source(path: Path, ctx, *, stage: str, message: str, before=None) -> tuple[str, dict]:
     """Read every byte, with bounded progress writes and cheap mutation guards."""
     ctx.check_cancel()
@@ -260,11 +269,14 @@ def probe_and_hash(item: dict, ctx) -> dict:
         if timecode:
             break
     video = videos[0] if videos else {}
+    audio_durations = [_zero_start_duration(stream) for stream in audios]
     return {
         "id": identity,
         "media_id": identity,
         "name": path.name,
         "duration": duration,
+        "video_duration": _zero_start_duration(video) if videos else None,
+        "audio_duration": max(audio_durations) if audio_durations and all(value is not None for value in audio_durations) else None,
         "fps": _rate(video) if videos else None,
         "has_video": bool(videos),
         "has_audio": bool(audios),

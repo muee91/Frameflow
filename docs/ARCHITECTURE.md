@@ -88,6 +88,8 @@ stateDiagram-v2
 
 `mapping.points` 是源时间到组时间的有理数映射。统一语义为 `group_time = offset + rate × source_time`，仅当全部点符合线性映射才显示该简式。分段非线性点原样保留，标记阻断；不能只取首尾偷换成整体错位。
 
+macOS 原生检查器可能以视频流结尾作为素材时长，而 FFprobe 的容器时长还包括很短的音频尾部。适配只在 FFprobe 独立读得零起点视频/全部音频流时长、引擎映射完整覆盖其声明范围、差异不超过一帧且映射为恒定偏移时延用该偏移补齐音频尾部。保留 `original_mapping`、`range_adjustment` 和全部源时长；不改原始引擎 JSON。交付副本采用完整来源时长。缺少流时长证据、真正的部分映射、非线性或漂移不会经此入口放行。
+
 默认上游导出会排序放置 unmatched。Frameflow 必须使用 `--unmatched remove`，同时保留自己的待处理/排除清单。只含时间码或连续录制证据仍是候选。独立同步组没有共同原点，不自动拼接为一条可信母版。
 
 CLI 当前不暴露可靠优雅取消 checkpoint；Frameflow 用进程组退出+丢弃临时结果实现安全取消。上游缓存复用不等于 Frameflow 断点恢复。
@@ -104,5 +106,9 @@ CLI 当前不暴露可靠优雅取消 checkpoint；Frameflow 用进程组退出+
 | [Premiere](https://helpx.adobe.com/premiere-pro/using/create-multi-camera-source-sequence.html) | 检查真正的 Multi-Camera Source Sequence，源监视器/时间线切换、独立录音与全部通道；XML 平铺轨道不是验收。 |
 | [Final Cut Pro XML](https://developer.apple.com/documentation/professional-video-applications/fcpxml-reference) | 原生结构需要 media/multicam/mc-angle 与 mc-clip/mc-source；DTD/结构验证后仍需实际 Angle Editor、切换、保存重开。 |
 | 国内剪映专业版 | 尚未核实公开稳定官方桌面工程 SDK/导入约定。不能将国际 CapCut 或私有 draft 生成器当成国内 Windows/macOS 都已支持。保留独立实验适配与版本验收。 |
+
+Resolve 21.1 的本机 Developer/Scripting `README.md`、类型定义及实际 Studio 21.1.0.14 运行时已核实 `CreateMulticamClip`、`SetMarkInOut`、`MULTICAM_ANGLE_SYNC_IN`、`useFullClipExtents` 和 `MULTICAM_AUDIO_ALL`。`tools/import_resolve.py` 是当前最小实验桥接：读取已核对清单和 FCPXML 本机绑定、完整 SHA256 复核，创建全新工程，保留普通多轨母版，使用同一公共时间点在每份源素材上的入点建立原生多机位；临时标记清除后保存。它不增加第二套匹配算法或应用状态机，也不将实验性 FCPXML 的 multicam 元素当作 Resolve 原生导入证据。
+
+该首验桥接明确限制同帧率、单组、共同重叠区间、单位速率和每份源素材 1–2 声道。入点换算只在末端量化到帧，`useFullClipExtents` 请求保留标记前后范围；实际帧/子帧范围与声道仍须在 NLE 检查。当前工程非空或同名项目存在即停止，不替用户保存、关闭或覆盖现有工作；不自动扩大外部脚本权限。所有本机工程和绑定留在仓库外。
 
 后续 AI Provider 使用独立分析任务，输入媒体 ID 与同步修订，输出证据、Provider/模型版本、耗时和来源范围。人工修正是第一方事实，AI 不得静默覆盖。团队同步以后只共享上述事实与修订，本机 bindings 永不进入团队真相源。

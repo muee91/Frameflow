@@ -53,7 +53,8 @@ def portable_manifest(store, project_id, result):
     fields = {"id", "media_id", "name", "kind", "camera", "duration", "fps", "has_video", "has_audio",
               "width", "height", "audio_channels", "bytes", "group_id", "offset_seconds", "rate", "status",
               "reason", "evidence", "mapping", "blocked_reason", "review_reason",
-              "suggested_offset_seconds", "suggested_group_id", "original_mapping"}
+              "suggested_offset_seconds", "suggested_group_id", "original_mapping",
+              "video_duration", "audio_duration", "range_adjustment"}
     project = store.project(project_id)
     return {"schema_version": 1, "product": "Frameflow", "product_version": __version__,
             "project": {"id": project["id"], "name": project["name"]},

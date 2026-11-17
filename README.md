@@ -77,6 +77,21 @@ frameflow
 - FCPXML 候选含单个同步组的多轨序列和 `multicam/mc-angle/mc-clip` 结构；尚未在 Final Cut 中验证原生对象是否正确。其他目标的正式交付适配仍在验收清单中。
 - 本轮有稳定内容身份和本机绑定分层，没有完整的跨电脑导入/重链 UI、多人同步或 AI 场记。
 
+### Resolve 21.1 本机验收桥接（实验）
+
+先从同一已核对修订导出同步清单和 FCPXML 候选。在 Resolve 中保存并关闭现有工程，返回项目管理器，再用其自带的 Python 运行：
+
+```bash
+"$RESOLVE_PYTHON" tools/import_resolve.py \
+  --manifest /path/to/frameflow-sync-manifest.json \
+  --fcpxml /path/to/frameflow-experimental.fcpxml \
+  --name Frameflow验收
+```
+
+`RESOLVE_PYTHON` 指向目标安装自带的 `ResolvePython`。桥接先逐字节核对 FCPXML 本机媒体与清单内容身份，在**全新项目**中导入普通多轨母版，再通过官方 `CreateMulticamClip`、同步参考入点和 `useFullClipExtents` 建立原生对象及独立验收时间线；不再次自动同步，不覆盖现有工程，不修改原片或自动改变脚本权限。
+
+当前入口仅针对 Resolve 21.1、相同帧率、单组恒定偏移、有共同重叠区间、每份素材单声道或立体声。缺少证据、分段/漂移、未核对素材及其它声道布局会阻断。仍须在目标软件核对完整范围和音轨、切换角度、单路监听、保存重开及重链；导入脚本始终保留 `nle_import_verified=false`，实际验收只记录在当前任务清单。
+
 ## 开发与验证
 
 ```bash

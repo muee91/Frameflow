@@ -169,6 +169,62 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(clip["offset_seconds"])
         self.assertEqual(clip["mapping"], points)
 
+    def av_tail_fixture(self):
+        # macOS Align 0.3.3 uses the video's end while ffprobe reports the
+        # container/audio end. These are metadata from one source, not a trim.
+        self.assets[0].update(duration=30.01, has_video=True, fps="25/1",
+                              video_duration=30.0, audio_duration=30.01)
+        self.raw["project"]["clips"][0]["kind"] = "video"
+        self.raw["project"]["clips"][0]["video"] = {
+            "width": 320, "height": 180, "frameDuration": time_value(0.04),
+            "sourceTimecode": None, "frameRateMode": "constant"}
+
+    def test_verified_short_audio_tail_keeps_full_source_and_original_mapping(self):
+        self.av_tail_fixture()
+        original = deepcopy(self.raw)
+        clip = self.normalised()["clips"][0]
+        self.assertEqual(clip["duration"], 30.01)
+        self.assertEqual(clip["rate"], 1.0)
+        self.assertEqual(clip["offset_seconds"], 0.0)
+        self.assertAlmostEqual(float(engine._time(clip["mapping"][-1]["source"])), 30.01)
+        self.assertAlmostEqual(float(engine._time(clip["mapping"][-1]["island"])), 30.01)
+        self.assertEqual(clip["original_mapping"], original["islands"][0]["placements"][0]["mapping"]["points"])
+        self.assertEqual(clip["range_adjustment"]["basis"], "verified_av_tail")
+        self.assertEqual(self.raw, original)
+
+    def test_tail_reconciliation_needs_metadata_and_never_accepts_partial_or_drifting_maps(self):
+        self.av_tail_fixture()
+        for mode in ("missing_metadata", "long_tail", "different_video_end", "partial", "drift", "audio_only"):
+            assets, raw = deepcopy(self.assets), deepcopy(self.raw)
+            if mode == "missing_metadata": assets[0].pop("audio_duration")
+            if mode == "long_tail": assets[0].update(duration=30.08, audio_duration=30.08)
+            if mode == "different_video_end": assets[0]["video_duration"] = 29.98
+            if mode == "partial": raw["islands"][0]["placements"][0]["mapping"]["points"][-1]["source"] = time_value(29.99)
+            if mode == "drift": raw["islands"][0]["placements"][0]["mapping"]["points"][-1]["island"] = time_value(30.003)
+            if mode == "audio_only": assets[0]["has_video"] = False
+            with self.subTest(mode=mode), self.assertRaises(TaskError):
+                engine._normalise(raw, assets)
+
+    def test_export_retains_verified_audio_tail_without_changing_raw_evidence(self):
+        self.av_tail_fixture()
+        result = self.approved()
+        source = self.raw_file()
+        original = source.read_bytes()
+
+        def run(argv, context, **kwargs):
+            reviewed = json.loads(Path(argv[-2]).read_text())
+            self.assertAlmostEqual(float(engine._time(reviewed["project"]["clips"][0]["duration"])), 30.01)
+            last = reviewed["islands"][0]["placements"][0]["mapping"]["points"][-1]
+            self.assertAlmostEqual(float(engine._time(last["source"])), 30.01)
+            output = Path(argv[-1]) / "tail.fcpxml"
+            output.write_text("<fcpxml/>")
+            return json.dumps([{"format": "finalCutProXML", "url": str(output)}])
+
+        with patch.object(engine, "_require_engine", return_value=self.info), patch.object(engine, "run_command", side_effect=run):
+            engine.export_fcpxml("align-cli", source, result, self.root / "tail-export", self.ctx,
+                                 verified_paths=self.verified_paths)
+        self.assertEqual(source.read_bytes(), original)
+
     def test_unenrolled_paths_and_contradictory_states_are_rejected(self):
         raw = deepcopy(self.raw)
         raw["project"]["clips"][0]["url"] = str(self.root / "not-selected.wav")

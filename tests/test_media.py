@@ -156,6 +156,19 @@ class MediaTests(unittest.TestCase):
                     probe_and_hash(item(path), Context())
             self.assertEqual(error.exception.code, "INVALID_MEDIA")
 
+    def test_probe_preserves_distinct_video_and_audio_end_evidence(self):
+        metadata = {"format": {"duration": "61.25"}, "streams": [
+            {"codec_type": "video", "duration": "61.24", "avg_frame_rate": "25/1"},
+            {"codec_type": "audio", "duration": "61.25", "channels": 2}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "av-tail.mp4"
+            path.write_bytes(b"synthetic metadata fixture")
+            with patch("frameflow.media.run_command", return_value=json.dumps(metadata)):
+                result = probe_and_hash(item(path), Context())
+        self.assertEqual(result["duration"], 61.25)
+        self.assertEqual(result["video_duration"], 61.24)
+        self.assertEqual(result["audio_duration"], 61.25)
+
     def test_hash_observes_middle_bytes_and_can_be_cancelled(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "long.wav"
