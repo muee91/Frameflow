@@ -445,7 +445,7 @@
           job.state
         : stateTitles[job.state] || job.state;
     $("job-attempt").textContent =
-      `${job.kind === "export" ? "工程导出" : "同步任务"} · 第 ${job.attempt || 1} 次尝试`;
+      `${job.kind === "export" ? "工程导出" : "同步任务"} · 项目任务 ${job.attempt || 1}`;
     $("job-state-dot").className = `large-dot ${job.state}`;
     $("job-message").textContent =
       job.message ||

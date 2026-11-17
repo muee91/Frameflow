@@ -80,13 +80,24 @@
 - 本地收集 83 项测试，81 项通过、2 项 Windows 专属测试按平台跳过；包括两个 opt-in 真实 Align 用例。覆盖 API、状态竞争、媒体、进程、引擎、修订与静态资源。使用 Python 3.12、真实 FFmpeg 7.1.5 / Align 0.3.3；不能把 Windows skip 当作通过。
 - 完整合成处理链：60 秒确定性声音、两路 H.264/AAC-LC MP4、独立立体 PCM WAV，1.250 秒已知错位。真实扫描/FFprobe/哈希/Align→全部 proposed→逐片人工理由→manifest→异步 FCPXML 下载通过，偏移误差 <= 25fps 的一帧。XML 验证了三份素材、立体音频、两条 sequence 以及 multicam/mc-angle/mc-clip；没有在 NLE 导入。
 - 独立审查复现并修复：失败重扫更新绑定后，旧 raw 引擎路径可能指向错误文件。导出现在强制使用当前已验证的 media ID→路径，并在完成前再次检查相同文件；新增旧路径替换、导出期间源变化、人工 offset 与有理数 mapping 一致性的回归。
-- CI 已验证 Linux/macOS 核心检查，Windows 的 Job Object 父进程退出后取消、隔离失败不执行工具的原生回归也已通过；新增完整身份门控后的整轮检查仍待最新提交复验。已修复实际发现的规范路径差异、文件状态/锁语义、缓冲误暂停，以及起点小数精度被 HTML step 约束拦截的问题。
+- [提交 `6600039` 的完整 CI](https://github.com/muee91/Frameflow/actions/runs/44068732622)四项全部通过，包含新增完整身份发布门控。Windows 的 Job Object 父进程退出后取消、隔离失败不执行工具的原生回归实际执行通过。已修复实际发现的规范路径差异、文件状态/锁语义、缓冲误暂停，以及起点小数精度被 HTML step 约束拦截的问题。
 - Windows 快速改写暴露了元数据时间戳碰撞边界。同步发布前、工程导出前后现在执行可取消的完整 SHA256 复核；固定的元数据碰撞回归验证内容改变仍被拒绝，没有用 sleep 或跳过测试掩盖问题。Range 继续使用轻量元数据快查。
-- [真实 Chromium 流程](https://github.com/muee91/Frameflow/actions/runs/44068310159/job/133987678616)已通过（UI 提交 `47d904c`）：三路真实合成媒体加载与共同跳转、两个视频时钟前进、独立录音单路监听、人工逐片确认、异步导出与浏览器下载。桌面与 390px 窄屏截图保留为该 CI 的合成证据；没有浏览器/API/媒体 mock。
-- DOM 行为测试与 JS 语法检查通过，覆盖缓冲恢复、手动暂停使迟到回调失效、播放错误阻止确认、源帧微调与独立录音 10ms 微调。核对理由不预填；完成任务收起事件，不挤占播放区。本机 Cloud 预览不可达，真实浏览器结论来自上述 CI，不来自 DOM 测试。
+- [真实 Chromium 流程](https://github.com/muee91/Frameflow/actions/runs/44068732622/job/133989150690)已通过：三路真实合成媒体加载与共同跳转、两个视频时钟前进、独立录音单路监听、人工逐片确认、异步导出与浏览器下载。桌面与 390px 窄屏截图保留为该 CI 的合成证据；没有浏览器/API/媒体 mock。
+- DOM 行为测试与 JS 语法检查通过，覆盖缓冲恢复、手动暂停使迟到回调失效、播放错误阻止确认、源帧微调与独立录音 10ms 微调。核对理由不预填；完成任务收起事件，不挤占播放区。真实浏览器结论来自上述 CI，不来自 DOM 测试。
 - 真实拍摄素材：**未验证**。Windows/macOS 完整应用与 NLE 原生导入：**未验证**。没有任何目标 NLE 标记为 import_verified。
 
 复现真实合成链：设置 `FRAMEFLOW_TEST_ALIGN` 指向单独安装的 0.3.3 CLI，再运行 `python -m unittest discover -s tests -v`。真实浏览器 gate 使用 `python tools/browser_smoke.py --artifacts <临时证据目录>`；CI 在专用 runner 安装 Playwright Chromium 后运行。生成的媒体、原始 JSON、数据库和工程不提交仓库。
+
+上述 CI 均收集 83 项单元/合约/合成测试，按适用环境分别执行，跳过项不计为通过：
+
+| 执行环境 | 通过 | 跳过 | 跳过原因 / 独立浏览器结果 |
+| --- | ---: | ---: | --- |
+| Ubuntu 24.04.5 核心 | 79 | 4 | 两项 Windows 原生测试、两项 opt-in Align 测试 |
+| macOS 26.7.2 核心 | 79 | 4 | 两项 Windows 原生测试、两项 opt-in Align 测试 |
+| Windows Server 2025 核心 | 80 | 3 | 一项 POSIX 进程组测试、两项 opt-in Align 测试 |
+| Linux 实际 Align + 浏览器 | 81 | 2 | 仅两项 Windows 原生测试；额外 Chromium 全流程通过 |
+
+该表证明核心平台行为和 Linux 合成链，不等于 Windows/macOS 桌面安装器、所有专业编码或 NLE 实机导入已验收。后续提交的自动检查以 PR checks 为准。
 
 ## 尚存风险与合并门槛
 
