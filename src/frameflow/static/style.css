@@ -1889,3 +1889,27 @@ body.workspace-active .steps { display: none; }
 .mapping-diagnostic summary { padding: 8px; cursor: pointer; }
 .mapping-points { list-style: decimal; padding: 4px 8px 8px 25px; margin: 0; max-height: 220px; overflow-y: auto; }
 .mapping-points li { font-variant-numeric: tabular-nums; font-size: 10px; padding: 5px 2px; line-height: 1.5; border-bottom: 1px solid #594737; }
+
+
+.marker-add {
+  background: #29334a;
+  color: #d9d0fc;
+  border: 1px solid #5c5483;
+  border-radius: 4px;
+  padding: 5px 9px;
+  font-size: 10px;
+}
+.marker-add:hover { background: #423b6c; }
+.timeline-marker-line {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  border-left: 1px dashed #c6a0e8;
+  z-index: 4; pointer-events: none; opacity: .7;
+}
+.timeline-marker {
+  position: absolute; top: 0; z-index: 15;
+  background: #67558f; color: #fff0cb;
+  border: 1px solid #a391c8; border-radius: 3px;
+  font-size: 11px; padding: 0 4px; height: 17px;
+  transform: translateX(-45%); cursor: pointer;
+}
+.timeline-marker:hover { background: #806da5; }
