@@ -59,7 +59,7 @@ class ExportInput(BaseModel):
 def portable_manifest(store, project_id, result):
     """An allowlist, not path redaction: local bindings/raw engine JSON cannot escape."""
     fields = {"id", "media_id", "name", "kind", "camera", "duration", "fps", "has_video", "has_audio",
-              "width", "height", "audio_channels", "bytes", "group_id", "offset_seconds", "rate", "status",
+              "width", "height", "audio_channels", "audio_streams", "bytes", "group_id", "offset_seconds", "rate", "status",
               "reason", "evidence", "mapping", "blocked_reason", "review_reason",
               "suggested_offset_seconds", "suggested_group_id", "original_mapping",
               "video_duration", "audio_duration", "range_adjustment"}
